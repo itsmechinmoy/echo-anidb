@@ -1,22 +1,37 @@
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
+    id("java-library")
+    id("maven-publish")
+    alias(libs.plugins.gradle.shadow)
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlinx.serialization)
 }
 
 dependencies {
-    implementation(project(":ext"))
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
+
+    implementation(libs.jsoup)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.echo.common)
+    testImplementation(libs.jsoup)
+    testImplementation(libs.kotlinx.serialization.json)
+    testImplementation(libs.okhttp)
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
+
+// Extension properties goto `gradle.properties` to set values
 
 val extType: String by project
 val extId: String by project
@@ -37,62 +52,49 @@ val gitCount = execute("git", "rev-list", "--count", "HEAD").toInt()
 val verCode = gitCount
 val verName = "v$gitHash"
 
+publishing {
+    publications {
+        create<MavenPublication>("mavenJava") {
+            groupId = "dev.brahmkshatriya.echo.extension"
+            artifactId = extId
+            version = verName
 
-val outputDir = file("${layout.buildDirectory.asFile.get()}/generated/proguard")
-val generatedProguard = file("${outputDir}/generated-rules.pro")
-
-tasks.register("generateProguardRules") {
-    doLast {
-        outputDir.mkdirs()
-        generatedProguard.writeText(
-            """
-                -dontobfuscate
-                -keep,allowoptimization class dev.brahmkshatriya.echo.extension.$extClass
-                """.trimMargin()
-        )
-    }
-}
-
-tasks.named("preBuild") {
-    dependsOn("generateProguardRules")
-}
-
-android {
-    namespace = "dev.brahmkshatriya.echo.extension"
-    compileSdk = 36
-    defaultConfig {
-        applicationId = "dev.brahmkshatriya.echo.extension.$extId"
-        minSdk = 24
-        targetSdk = 36
-
-        manifestPlaceholders.apply {
-            put("type", "dev.brahmkshatriya.echo.${extType}")
-            put("id", extId)
-            put("class_path", "dev.brahmkshatriya.echo.extension.${extClass}")
-            put("version", verName)
-            put("version_code", verCode.toString())
-            put("icon_url", extIconUrl ?: "")
-            put("app_name", "Echo : $extName Extension")
-            put("name", extName)
-            put("description", extDescription ?: "")
-            put("author", extAuthor)
-            put("author_url", extAuthorUrl ?: "")
-            put("repo_url", extRepoUrl ?: "")
-            put("update_url", extUpdateUrl ?: "")
+            from(components["java"])
         }
     }
+}
 
-    buildTypes {
-        all {
-            isMinifyEnabled = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                generatedProguard.absolutePath
+tasks {
+    shadowJar {
+        archiveBaseName.set(extId)
+        archiveVersion.set(verName)
+        manifest {
+            attributes(
+                mapOf(
+                    "Extension-Id" to extId,
+                    "Extension-Type" to extType,
+                    "Extension-Class" to extClass,
+
+                    "Extension-Version-Code" to verCode,
+                    "Extension-Version-Name" to verName,
+
+                    "Extension-Icon-Url" to extIconUrl,
+                    "Extension-Name" to extName,
+                    "Extension-Description" to extDescription,
+
+                    "Extension-Author" to extAuthor,
+                    "Extension-Author-Url" to extAuthorUrl,
+
+                    "Extension-Repo-Url" to extRepoUrl,
+                    "Extension-Update-Url" to extUpdateUrl
+                )
             )
         }
     }
 }
 
-fun execute(vararg command: String): String = providers.exec {
-    commandLine(*command)
-}.standardOutput.asText.get().trim()
+fun execute(vararg command: String): String = runCatching {
+    providers.exec {
+        commandLine(*command)
+    }.standardOutput.asText.get().trim()
+}.getOrElse { "1" }
