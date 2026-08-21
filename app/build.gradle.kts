@@ -56,7 +56,18 @@ tasks.register("generateProguardRules") {
         generatedProguard.writeText(
             """
                 -dontobfuscate
-                -keep,allowoptimization class dev.brahmkshatriya.echo.extension.$extClass
+                -keep public class dev.brahmkshatriya.echo.extension.$extClass {
+                    public <init>();
+                    public *;
+                }
+                -keep class dev.brahmkshatriya.echo.extension.** { *; }
+                -keep class kotlinx.serialization.** { *; }
+                -keepclassmembers class * {
+                    @kotlinx.serialization.Serializable <fields>;
+                    @kotlinx.serialization.Serializable <init>(...);
+                }
+                -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+                -dontwarn **
                 """.trimMargin()
         )
     }
