@@ -1,25 +1,21 @@
 plugins {
-    id("java-library")
-    id("maven-publish")
-    alias(libs.plugins.gradle.shadow)
-    alias(libs.plugins.kotlin.jvm)
-    alias(libs.plugins.kotlinx.serialization)
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
 }
 
 dependencies {
+    implementation(project(":ext"))
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
+}
 
-    implementation(libs.jsoup)
-    implementation(libs.kotlinx.serialization.json)
-    implementation(libs.okhttp)
-
-    testImplementation(libs.junit)
-    testImplementation(libs.coroutines.test)
-    testImplementation(libs.echo.common)
-    testImplementation(libs.jsoup)
-    testImplementation(libs.kotlinx.serialization.json)
-    testImplementation(libs.okhttp)
+configurations.all {
+    resolutionStrategy {
+        force("org.jetbrains.kotlin:kotlin-stdlib:2.2.10")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.2.10")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.2.10")
+        force("org.jetbrains.kotlin:kotlin-stdlib-common:2.2.10")
+    }
 }
 
 java {
@@ -30,8 +26,6 @@ java {
 kotlin {
     jvmToolchain(21)
 }
-
-// Extension properties goto `gradle.properties` to set values
 
 val extType: String by project
 val extId: String by project
@@ -52,42 +46,57 @@ val gitCount = execute("git", "rev-list", "--count", "HEAD").toInt()
 val verCode = gitCount
 val verName = "v$gitHash"
 
-publishing {
-    publications {
-        create<MavenPublication>("mavenJava") {
-            groupId = "dev.brahmkshatriya.echo.extension"
-            artifactId = extId
-            version = verName
 
-            from(components["java"])
-        }
+val outputDir = file("${layout.buildDirectory.asFile.get()}/generated/proguard")
+val generatedProguard = file("${outputDir}/generated-rules.pro")
+
+tasks.register("generateProguardRules") {
+    doLast {
+        outputDir.mkdirs()
+        generatedProguard.writeText(
+            """
+                -dontobfuscate
+                -keep,allowoptimization class dev.brahmkshatriya.echo.extension.$extClass
+                """.trimMargin()
+        )
     }
 }
 
-tasks {
-    shadowJar {
-        archiveBaseName.set(extId)
-        archiveVersion.set(verName)
-        manifest {
-            attributes(
-                mapOf(
-                    "Extension-Id" to extId,
-                    "Extension-Type" to extType,
-                    "Extension-Class" to extClass,
+tasks.named("preBuild") {
+    dependsOn("generateProguardRules")
+}
 
-                    "Extension-Version-Code" to verCode,
-                    "Extension-Version-Name" to verName,
+android {
+    namespace = "dev.brahmkshatriya.echo.extension"
+    compileSdk = 36
+    defaultConfig {
+        applicationId = "dev.brahmkshatriya.echo.extension.$extId"
+        minSdk = 24
+        targetSdk = 36
 
-                    "Extension-Icon-Url" to extIconUrl,
-                    "Extension-Name" to extName,
-                    "Extension-Description" to extDescription,
+        manifestPlaceholders.apply {
+            put("type", "dev.brahmkshatriya.echo.${extType}")
+            put("id", extId)
+            put("class_path", "dev.brahmkshatriya.echo.extension.${extClass}")
+            put("version", verName)
+            put("version_code", verCode.toString())
+            put("icon_url", extIconUrl ?: "")
+            put("app_name", "Echo : $extName Extension")
+            put("name", extName)
+            put("description", extDescription ?: "")
+            put("author", extAuthor)
+            put("author_url", extAuthorUrl ?: "")
+            put("repo_url", extRepoUrl ?: "")
+            put("update_url", extUpdateUrl ?: "")
+        }
+    }
 
-                    "Extension-Author" to extAuthor,
-                    "Extension-Author-Url" to extAuthorUrl,
-
-                    "Extension-Repo-Url" to extRepoUrl,
-                    "Extension-Update-Url" to extUpdateUrl
-                )
+    buildTypes {
+        all {
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                generatedProguard.absolutePath
             )
         }
     }
