@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.extension
 import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
+import dev.brahmkshatriya.echo.common.clients.LyricsClient
 import dev.brahmkshatriya.echo.common.clients.QuickSearchClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.ShareClient
@@ -20,6 +21,7 @@ import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
+import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.QuickSearchItem
 import dev.brahmkshatriya.echo.common.models.Shelf
@@ -89,6 +91,7 @@ class AniDBExtension :
     AlbumClient,
     TrackClient,
     TrackChapterClient,
+    LyricsClient,
     ShareClient {
 
     val baseUrl = "https://anidb.app"
@@ -709,6 +712,63 @@ class AniDBExtension :
             chaptersCache.put(cacheKey, chapters)
         }
         return chapters
+    }
+
+    // =========================== Lyrics Client ============================
+
+    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
+        val animeId = track.extras["animeId"]
+        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString()
+        val list = mutableListOf<Lyrics>()
+
+        // 1. Episode Synopsis & Overview from AniZip / Track Description
+        val desc = track.description?.takeIf { it.isNotBlank() }
+            ?: (track.album?.let { getAniZipMeta(it, animeId ?: "") }?.episodes?.get(epNumberStr)?.overview)
+            ?: (track.album?.description?.takeIf { it.isNotBlank() })
+
+        if (!desc.isNullOrBlank()) {
+            list.add(
+                Lyrics(
+                    id = "synopsis_${track.id}",
+                    title = "Episode Synopsis",
+                    subtitle = track.title,
+                    lyrics = Lyrics.Lyric.Simple(desc),
+                    extras = mapOf("text" to desc)
+                )
+            )
+        }
+
+        // 2. Timed Chapters & Segment Markers (Opening, Ending, Recap)
+        val chapters = getChapters(track)
+        if (chapters.isNotEmpty()) {
+            val timedItems = chapters.map { ch ->
+                Lyrics.Item(
+                    text = "▶ ${ch.name}",
+                    startTime = ch.startTime,
+                    endTime = ch.endTime
+                )
+            }
+            list.add(
+                Lyrics(
+                    id = "chapters_${track.id}",
+                    title = "Episode Segments & OP/ED",
+                    subtitle = "AniSkip Markers",
+                    lyrics = Lyrics.Lyric.Timed(timedItems, fillTimeGaps = true),
+                    extras = mapOf("isChapters" to "true")
+                )
+            )
+        }
+
+        return list.toFeed()
+    }
+
+    override suspend fun loadLyrics(lyrics: Lyrics): Lyrics {
+        if (lyrics.lyrics != null) return lyrics
+        val text = lyrics.extras["text"]
+        if (!text.isNullOrBlank()) {
+            return lyrics.copy(lyrics = Lyrics.Lyric.Simple(text))
+        }
+        return lyrics
     }
 
     // ============================== Share Client ==========================
