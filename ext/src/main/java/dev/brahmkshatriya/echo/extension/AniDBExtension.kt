@@ -82,16 +82,16 @@ class AniDBExtension :
                 key = PREF_QUALITY_KEY,
                 title = PREF_QUALITY_TITLE,
                 summary = "Preferred video playback quality",
-                entryTitles = PREF_QUALITY_ENTRIES,
-                entryValues = PREF_QUALITY_ENTRIES,
+                entryTitles = listOf("1080p", "720p", "360p"),
+                entryValues = listOf("1080p", "720p", "360p"),
                 defaultEntryIndex = 0,
             ),
             SettingList(
                 key = PREF_LANG_KEY,
                 title = PREF_LANG_TITLE,
                 summary = "Preferred audio language (Dub/Sub)",
-                entryTitles = PREF_LANG_ENTRIES,
-                entryValues = PREF_LANG_VALUES,
+                entryTitles = listOf("Japanese", "English"),
+                entryValues = listOf("jpn", "eng"),
                 defaultEntryIndex = 0,
             ),
             SettingSwitch(
@@ -565,6 +565,7 @@ class AniDBExtension :
             .header("User-Agent", USER_AGENT)
             .header("Referer", "$baseUrl/")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.5")
             .build()
 
         client.newCall(request).execute().use { response ->
@@ -576,18 +577,15 @@ class AniDBExtension :
     }
 
     companion object {
-        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_TITLE = "Preferred Quality"
         private const val PREF_QUALITY_DEFAULT = "1080p"
-        private val PREF_QUALITY_ENTRIES = listOf("1080p", "720p", "360p")
 
         private const val PREF_LANG_KEY = "preferred_lang"
         private const val PREF_LANG_TITLE = "Preferred Language"
         private const val PREF_LANG_DEFAULT = "jpn"
-        private val PREF_LANG_ENTRIES = listOf("Japanese", "English")
-        private val PREF_LANG_VALUES = listOf("jpn", "eng")
 
         private const val PREF_FILLER_TAG_KEY = "append_filler_tag"
         private const val PREF_FILLER_TAG_TITLE = "Filler Detection"
