@@ -243,9 +243,9 @@ class AniDBExtension :
         return fetchAnimeDetails(path, album)
     }
 
-    override suspend fun loadTracks(album: Album): Feed<Track> {
+    override suspend fun loadTracks(album: Album): Feed<Track> = PagedData.Single<Track> {
         val path = album.id
-        val lastSegment = (if (path.startsWith("http")) path else "$baseUrl$path").toHttpUrl().pathSegments.last()
+        val lastSegment = (if (path.startsWith("http")) path else "$baseUrl$path").toHttpUrl().pathSegments.lastOrNull() ?: path
         val animeId = ANIME_ID_REGEX.find(lastSegment)?.groupValues?.get(1) ?: lastSegment
 
         val episodesArr = episodesCache.get(animeId) ?: run {
@@ -259,8 +259,10 @@ class AniDBExtension :
             album
         } else {
             animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId") ?: try {
-                val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
-                fetchAnimeDetails(fullUrl, album)
+                withTimeoutOrNull(4000L) {
+                    val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
+                    fetchAnimeDetails(fullUrl, album)
+                } ?: album
             } catch (e: Exception) {
                 album
             }
@@ -282,7 +284,7 @@ class AniDBExtension :
             }
 
             if (param != null) {
-                aniZipCache.get(param) ?: run {
+                aniZipCache.get(param) ?: withTimeoutOrNull(4000L) {
                     val url = "https://api.ani.zip/mappings?$param"
                     val jsonStr = httpGet(url, isApi = true)
                     val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
@@ -300,7 +302,7 @@ class AniDBExtension :
         val hideFiller = setting?.getBoolean(PREF_FILLER_HIDE_KEY) ?: PREF_FILLER_HIDE_DEFAULT
         val showFillerTag = setting?.getBoolean(PREF_FILLER_TAG_KEY) ?: PREF_FILLER_TAG_DEFAULT
 
-        val tracks = episodesArr
+        episodesArr
             .filter { !hideFiller || !it.filler }
             .map { ep ->
                 val epNumber = ep.getAdjustedNumber(offset)
@@ -354,9 +356,7 @@ class AniDBExtension :
                     ),
                 )
             }
-
-        return PagedData.Single<Track> { tracks }.toFeed()
-    }
+    }.toFeed()
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
         val path = if (album.id.startsWith("http")) {
