@@ -536,85 +536,107 @@ class AniDBExtension :
                 async<List<Streamable.Source>>(Dispatchers.IO) {
                     try {
                         val embedHtml = httpGet(language.embedUrl)
-                        val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return@async emptyList<Streamable.Source>()
+                        val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
+                            ?: DIRECT_M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
+                            ?: return@async emptyList<Streamable.Source>()
 
                         val list = mutableListOf<Streamable.Source>()
 
-                        // 1080p stream
-                        list.add(
-                            Streamable.Source.Http(
-                                request = NetworkRequest(
-                                    url = m3u8Url.replace("master.m3u8", "index-f1-v1-a1.m3u8"),
-                                    headers = mapOf(
-                                        "Referer" to "$baseUrl/",
-                                        "User-Agent" to USER_AGENT,
+                        if (m3u8Url.contains("master.m3u8")) {
+                            // 1080p stream
+                            list.add(
+                                Streamable.Source.Http(
+                                    request = NetworkRequest(
+                                        url = m3u8Url.replace("master.m3u8", "index-f1-v1-a1.m3u8"),
+                                        headers = mapOf(
+                                            "Referer" to "$baseUrl/",
+                                            "User-Agent" to USER_AGENT,
+                                        ),
                                     ),
-                                ),
-                                type = Streamable.SourceType.HLS,
-                                decryption = null,
-                                quality = 1080,
-                                title = "${language.name} - 1080p",
-                                isVideo = true,
-                                isLive = false,
+                                    type = Streamable.SourceType.HLS,
+                                    decryption = null,
+                                    quality = 1080,
+                                    title = "${language.name} - 1080p",
+                                    isVideo = true,
+                                    isLive = false,
+                                )
                             )
-                        )
 
-                        // 720p stream
-                        list.add(
-                            Streamable.Source.Http(
-                                request = NetworkRequest(
-                                    url = m3u8Url.replace("master.m3u8", "index-f2-v1-a1.m3u8"),
-                                    headers = mapOf(
-                                        "Referer" to "$baseUrl/",
-                                        "User-Agent" to USER_AGENT,
+                            // 720p stream
+                            list.add(
+                                Streamable.Source.Http(
+                                    request = NetworkRequest(
+                                        url = m3u8Url.replace("master.m3u8", "index-f2-v1-a1.m3u8"),
+                                        headers = mapOf(
+                                            "Referer" to "$baseUrl/",
+                                            "User-Agent" to USER_AGENT,
+                                        ),
                                     ),
-                                ),
-                                type = Streamable.SourceType.HLS,
-                                decryption = null,
-                                quality = 720,
-                                title = "${language.name} - 720p",
-                                isVideo = true,
-                                isLive = false,
+                                    type = Streamable.SourceType.HLS,
+                                    decryption = null,
+                                    quality = 720,
+                                    title = "${language.name} - 720p",
+                                    isVideo = true,
+                                    isLive = false,
+                                )
                             )
-                        )
 
-                        // 360p stream
-                        list.add(
-                            Streamable.Source.Http(
-                                request = NetworkRequest(
-                                    url = m3u8Url.replace("master.m3u8", "index-f3-v1-a1.m3u8"),
-                                    headers = mapOf(
-                                        "Referer" to "$baseUrl/",
-                                        "User-Agent" to USER_AGENT,
+                            // 360p stream
+                            list.add(
+                                Streamable.Source.Http(
+                                    request = NetworkRequest(
+                                        url = m3u8Url.replace("master.m3u8", "index-f3-v1-a1.m3u8"),
+                                        headers = mapOf(
+                                            "Referer" to "$baseUrl/",
+                                            "User-Agent" to USER_AGENT,
+                                        ),
                                     ),
-                                ),
-                                type = Streamable.SourceType.HLS,
-                                decryption = null,
-                                quality = 360,
-                                title = "${language.name} - 360p",
-                                isVideo = true,
-                                isLive = false,
+                                    type = Streamable.SourceType.HLS,
+                                    decryption = null,
+                                    quality = 360,
+                                    title = "${language.name} - 360p",
+                                    isVideo = true,
+                                    isLive = false,
+                                )
                             )
-                        )
 
-                        // Auto / Multi-bitrate master stream
-                        list.add(
-                            Streamable.Source.Http(
-                                request = NetworkRequest(
-                                    url = m3u8Url,
-                                    headers = mapOf(
-                                        "Referer" to "$baseUrl/",
-                                        "User-Agent" to USER_AGENT,
+                            // Auto / Multi-bitrate master stream
+                            list.add(
+                                Streamable.Source.Http(
+                                    request = NetworkRequest(
+                                        url = m3u8Url,
+                                        headers = mapOf(
+                                            "Referer" to "$baseUrl/",
+                                            "User-Agent" to USER_AGENT,
+                                        ),
                                     ),
-                                ),
-                                type = Streamable.SourceType.HLS,
-                                decryption = null,
-                                quality = 1080,
-                                title = "${language.name} - Auto",
-                                isVideo = true,
-                                isLive = false,
+                                    type = Streamable.SourceType.HLS,
+                                    decryption = null,
+                                    quality = 1080,
+                                    title = "${language.name} - Auto",
+                                    isVideo = true,
+                                    isLive = false,
+                                )
                             )
-                        )
+                        } else {
+                            list.add(
+                                Streamable.Source.Http(
+                                    request = NetworkRequest(
+                                        url = m3u8Url,
+                                        headers = mapOf(
+                                            "Referer" to "$baseUrl/",
+                                            "User-Agent" to USER_AGENT,
+                                        ),
+                                    ),
+                                    type = if (m3u8Url.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
+                                    decryption = null,
+                                    quality = 1080,
+                                    title = "${language.name} - Default",
+                                    isVideo = true,
+                                    isLive = false,
+                                )
+                            )
+                        }
 
                         list
                     } catch (e: Exception) {
@@ -625,9 +647,10 @@ class AniDBExtension :
         }
 
         val sortedSources = sortSources(sources)
-        if (sortedSources.isNotEmpty()) {
-            streamSourcesCache.put(episodeId, sortedSources)
+        if (sortedSources.isEmpty()) {
+            throw Exception("No stream servers available for this episode.")
         }
+        streamSourcesCache.put(episodeId, sortedSources)
         return Streamable.Media.Server(sources = sortedSources, merged = false)
     }
 
@@ -1026,6 +1049,7 @@ class AniDBExtension :
         private const val PREF_AUTOSKIP_DEFAULT = false
 
         private val ANIME_ID_REGEX = Regex("-(\\d+)$")
-        private val M3U8_REGEX = Regex("""file:\s*['"](https?://[^'"]+master\.m3u8)['"]""")
+        private val M3U8_REGEX = Regex("""(?:file|source|src)\s*:\s*['"](https?://[^'"]+?\.m3u8[^'"]*)['"]""", RegexOption.IGNORE_CASE)
+        private val DIRECT_M3U8_REGEX = Regex("""(https?://[^\s'"]+?\.m3u8[^\s'"]*)""", RegexOption.IGNORE_CASE)
     }
 }
