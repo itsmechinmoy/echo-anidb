@@ -68,6 +68,14 @@ tasks {
     shadowJar {
         archiveBaseName.set(extId)
         archiveVersion.set(verName)
+
+        // Exclude Kotlin stdlib — must be resolved from the host app's classloader at runtime.
+        // Bundling it causes IllegalAccessError when ART tries to call package-private
+        // multifile facade classes (CollectionsKt__CollectionsKt etc.) across classloaders.
+        exclude("kotlin/**")
+        exclude("kotlinx/coroutines/**")
+        exclude("META-INF/kotlin*")
+
         manifest {
             attributes(
                 mapOf(
