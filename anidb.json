@@ -1,0 +1,11 @@
+[
+  {
+    "id": "anidb",
+    "type": "music",
+    "name": "AniDB",
+    "subtitle": "AniDB Extension for Echo",
+    "iconUrl": "https://anidb.app/images/fav-512.png",
+    "url": "https://anidb.app/",
+    "updateUrl": "https://api.github.com/repos/itsmechinmoy/echo-anidb/releases"
+  }
+]
