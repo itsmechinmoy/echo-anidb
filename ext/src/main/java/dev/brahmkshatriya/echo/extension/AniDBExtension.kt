@@ -313,11 +313,12 @@ class AniDBExtension :
                     ?: aniZipMeta?.episodes?.get(ep.number.toInt().toString())
 
                 val aniZipTitle = aniZipEp?.getEnglishOrRomajiTitle()
-                val baseTitle = ep.getFormattedTitle(offset, showFillerTag)
+                val label = ep.getEpisodeLabel(offset)
+                val fillerTag = if (ep.filler && showFillerTag) " (Filler)" else ""
                 val epTitle = if (!aniZipTitle.isNullOrBlank()) {
-                    "$baseTitle: $aniZipTitle"
+                    "$label: $aniZipTitle$fillerTag"
                 } else {
-                    baseTitle
+                    "Episode $label$fillerTag"
                 }
 
                 val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder()
