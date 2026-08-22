@@ -732,7 +732,7 @@ class AniDBExtension :
                     id = "synopsis_${track.id}",
                     title = "Episode Synopsis",
                     subtitle = track.title,
-                    lyrics = Lyrics.Lyric.Simple(desc),
+                    lyrics = Lyrics.Simple(desc),
                     extras = mapOf("text" to desc)
                 )
             )
@@ -753,7 +753,7 @@ class AniDBExtension :
                     id = "chapters_${track.id}",
                     title = "Episode Segments & OP/ED",
                     subtitle = "AniSkip Markers",
-                    lyrics = Lyrics.Lyric.Timed(timedItems, fillTimeGaps = true),
+                    lyrics = Lyrics.Timed(timedItems, fillTimeGaps = true),
                     extras = mapOf("isChapters" to "true")
                 )
             )
@@ -766,7 +766,7 @@ class AniDBExtension :
         if (lyrics.lyrics != null) return lyrics
         val text = lyrics.extras["text"]
         if (!text.isNullOrBlank()) {
-            return lyrics.copy(lyrics = Lyrics.Lyric.Simple(text))
+            return lyrics.copy(lyrics = Lyrics.Simple(text))
         }
         return lyrics
     }
