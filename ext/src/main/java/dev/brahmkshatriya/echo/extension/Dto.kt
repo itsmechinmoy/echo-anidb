@@ -89,3 +89,25 @@ data class AniZipImageDto(
     val coverType: String? = null,
     val url: String? = null,
 )
+
+@Serializable
+data class AniSkipResponseDto(
+    val found: Boolean = false,
+    val results: List<AniSkipResultDto> = emptyList(),
+    val message: String? = null,
+    val statusCode: Int? = null,
+)
+
+@Serializable
+data class AniSkipResultDto(
+    val interval: AniSkipIntervalDto,
+    val skipType: String,
+    val skipId: String? = null,
+    val episodeLength: Double? = null,
+)
+
+@Serializable
+data class AniSkipIntervalDto(
+    val startTime: Double,
+    val endTime: Double,
+)
