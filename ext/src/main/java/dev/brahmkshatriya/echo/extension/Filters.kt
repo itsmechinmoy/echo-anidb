@@ -30,11 +30,13 @@ object Filters {
 
     val YEARS by lazy {
         val currentYear = Calendar.getInstance().get(Calendar.YEAR)
-        buildList {
-            add(Pair("All", ""))
-            addAll((currentYear downTo 1968).map { Pair(it.toString(), it.toString()) })
-            add(Pair("1925", "1925"))
-        }.toTypedArray()
+        val list = ArrayList<Pair<String, String>>()
+        list.add(Pair("All", ""))
+        for (year in currentYear downTo 1968) {
+            list.add(Pair(year.toString(), year.toString()))
+        }
+        list.add(Pair("1925", "1925"))
+        list.toTypedArray()
     }
 
     val DEMOGRAPHICS = arrayOf(
