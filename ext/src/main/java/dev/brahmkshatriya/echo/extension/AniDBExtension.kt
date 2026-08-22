@@ -1062,13 +1062,21 @@ class AniDBExtension :
             if (href.isNotEmpty()) {
                 val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
                 if (fullUrl != currentUrl && href != currentUrl) {
-                    val title = a.attr("title").takeIf { it.isNotBlank() } ?: a.text()
+                    val rawTitle = a.attr("title").takeIf { it.isNotBlank() }
+                        ?: a.selectFirst("p.font-medium, p.text-sm, h3, h4")?.text()
+                        ?: a.text()
+                    val badge = a.selectFirst("span.badge, p.text-xs, p.text-muted, div.text-xs")?.text()?.trim()
+                    val relation = badge?.takeIf { it.isNotBlank() && !rawTitle.equals(it, ignoreCase = true) }
+                        ?: detectRelationFromTitle(rawTitle)
+
                     val coverUrl = a.selectFirst("img")?.absUrl("src")
                     val cover = coverUrl?.toImageHolder()
+
                     list.add(
                         Album(
                             id = href,
-                            title = title.ifBlank { "Season" },
+                            title = rawTitle.ifBlank { "Season" },
+                            subtitle = relation,
                             type = Album.Type.Show,
                             cover = cover,
                         )
@@ -1086,14 +1094,19 @@ class AniDBExtension :
             if (href.isNotEmpty()) {
                 val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
                 if (fullUrl != currentUrl && href != currentUrl) {
-                    val title = card.selectFirst("p.text-xs, .card-overlay p")?.text()
+                    val rawTitle = card.selectFirst("p.text-xs, .card-overlay p, p.font-medium")?.text()
                         ?: card.attr("title")
+                    val badge = card.selectFirst("span.badge, p.text-muted, div.text-xs, .card-overlay span")?.text()?.trim()
+                    val relation = badge?.takeIf { it.isNotBlank() && !rawTitle.equals(it, ignoreCase = true) }
+                        ?: detectRelationFromTitle(rawTitle)
+
                     val coverUrl = card.selectFirst("img")?.absUrl("src")
                     val cover = coverUrl?.toImageHolder()
                     list.add(
                         Album(
                             id = href,
-                            title = title,
+                            title = rawTitle,
+                            subtitle = relation,
                             type = Album.Type.Show,
                             cover = cover,
                         )
@@ -1102,6 +1115,26 @@ class AniDBExtension :
             }
         }
         return list.distinctBy { it.id }
+    }
+
+    private fun detectRelationFromTitle(title: String): String {
+        return when {
+            Regex("""(?i)\b(?:Season\s*1|1st\s*Season)\b""").containsMatchIn(title) -> "Season 1"
+            Regex("""(?i)\b(?:Season\s*2|2nd\s*Season)\b""").containsMatchIn(title) -> "Season 2"
+            Regex("""(?i)\b(?:Season\s*3|3rd\s*Season)\b""").containsMatchIn(title) -> "Season 3"
+            Regex("""(?i)\b(?:Season\s*4|4th\s*Season)\b""").containsMatchIn(title) -> "Season 4"
+            Regex("""(?i)\b(?:Season\s*5|5th\s*Season)\b""").containsMatchIn(title) -> "Season 5"
+            Regex("""(?i)\b(?:Season\s*6|6th\s*Season)\b""").containsMatchIn(title) -> "Season 6"
+            Regex("""(?i)\b(?:Final\s*Season|Part\s*2|Part\s*3|Cour\s*2)\b""").containsMatchIn(title) -> {
+                Regex("""(?i)\b(Final\s*Season|Part\s*\d+|Cour\s*\d+)\b""").find(title)?.value?.trim() ?: "Sequel"
+            }
+            Regex("""(?i)\b(?:Movie|The\s*Movie|Film)\b""").containsMatchIn(title) -> "Movie"
+            Regex("""(?i)\b(?:OVA|OAD|Special|Side\s*Story)\b""").containsMatchIn(title) -> "OVA / Special"
+            Regex("""(?i)\b(?:Prequel|Prolog)\b""").containsMatchIn(title) -> "Prequel"
+            Regex("""(?i)\b(?:Sequel)\b""").containsMatchIn(title) -> "Sequel"
+            Regex("""(?i)\b(?:Spin-off|Spinoff)\b""").containsMatchIn(title) -> "Spin-off"
+            else -> "Related"
+        }
     }
 
     private fun sortSources(sources: List<Streamable.Source>): List<Streamable.Source> {
