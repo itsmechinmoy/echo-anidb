@@ -442,15 +442,31 @@ class AniDBExtension :
 
         val html = httpGet(path)
         val document = Jsoup.parse(html, baseUrl)
-        val relatedAlbums = parseRelatedAnime(document)
-        if (relatedAlbums.isEmpty()) return null
+        val shelves = mutableListOf<Shelf>()
 
-        val shelf = Shelf.Lists.Items(
-            id = "related",
-            title = "Related & Recommendations",
-            list = relatedAlbums,
-        )
-        return mutableListOf<Shelf>(shelf).toFeed()
+        val seasons = parseSeasons(document, path)
+        if (seasons.isNotEmpty()) {
+            shelves.add(
+                Shelf.Lists.Items(
+                    id = "seasons",
+                    title = "Seasons",
+                    list = seasons,
+                )
+            )
+        }
+
+        val relatedAlbums = parseRelatedAnime(document, path)
+        if (relatedAlbums.isNotEmpty()) {
+            shelves.add(
+                Shelf.Lists.Items(
+                    id = "related",
+                    title = "Related & Recommendations",
+                    list = relatedAlbums,
+                )
+            )
+        }
+
+        return if (shelves.isEmpty()) null else shelves.toFeed()
     }
 
     // ============================== Track Client ==========================
@@ -1039,23 +1055,50 @@ class AniDBExtension :
         return album
     }
 
-    private fun parseRelatedAnime(document: Document): List<Album> {
+    private fun parseSeasons(document: Document, currentUrl: String): List<Album> {
+        val list = mutableListOf<Album>()
+        document.select("div.overflow-x-auto.snap-x a[href*=/anime/]").forEach { a ->
+            val href = a.attr("href")
+            if (href.isNotEmpty()) {
+                val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
+                if (fullUrl != currentUrl && href != currentUrl) {
+                    val title = a.attr("title").takeIf { it.isNotBlank() } ?: a.text()
+                    val coverUrl = a.selectFirst("img")?.absUrl("src")
+                    val cover = coverUrl?.toImageHolder()
+                    list.add(
+                        Album(
+                            id = href,
+                            title = title.ifBlank { "Season" },
+                            type = Album.Type.Show,
+                            cover = cover,
+                        )
+                    )
+                }
+            }
+        }
+        return list.distinctBy { it.id }
+    }
+
+    private fun parseRelatedAnime(document: Document, currentUrl: String): List<Album> {
         val list = mutableListOf<Album>()
         document.select(".anime-grid a.anime-card").forEach { card ->
             val href = card.attr("href")
             if (href.isNotEmpty()) {
-                val title = card.selectFirst("p.text-xs, .card-overlay p")?.text()
-                    ?: card.attr("title")
-                val coverUrl = card.selectFirst("img")?.absUrl("src")
-                val cover = coverUrl?.toImageHolder()
-                list.add(
-                    Album(
-                        id = href,
-                        title = title,
-                        type = Album.Type.Show,
-                        cover = cover,
+                val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
+                if (fullUrl != currentUrl && href != currentUrl) {
+                    val title = card.selectFirst("p.text-xs, .card-overlay p")?.text()
+                        ?: card.attr("title")
+                    val coverUrl = card.selectFirst("img")?.absUrl("src")
+                    val cover = coverUrl?.toImageHolder()
+                    list.add(
+                        Album(
+                            id = href,
+                            title = title,
+                            type = Album.Type.Show,
+                            cover = cover,
+                        )
                     )
-                )
+                }
             }
         }
         return list.distinctBy { it.id }
