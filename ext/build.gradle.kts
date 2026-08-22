@@ -9,9 +9,9 @@ plugins {
 dependencies {
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
+    compileOnly(libs.kotlinx.serialization.json)
 
     implementation(libs.jsoup)
-    implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
 
     testImplementation(libs.junit)
