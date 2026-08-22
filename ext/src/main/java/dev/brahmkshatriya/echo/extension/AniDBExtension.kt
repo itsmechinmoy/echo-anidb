@@ -134,8 +134,8 @@ class AniDBExtension :
                 key = PREF_QUALITY_KEY,
                 title = PREF_QUALITY_TITLE,
                 summary = "Preferred video playback quality",
-                entryTitles = mutableListOf("1080p", "720p", "360p"),
-                entryValues = mutableListOf("1080p", "720p", "360p"),
+                entryTitles = mutableListOf("1080p", "720p", "360p", "Auto"),
+                entryValues = mutableListOf("1080p", "720p", "360p", "Auto"),
                 defaultEntryIndex = 0,
             ),
             SettingList(
@@ -420,7 +420,67 @@ class AniDBExtension :
                         val embedHtml = httpGet(language.embedUrl)
                         val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return@async emptyList<Streamable.Source>()
 
-                        mutableListOf(
+                        val list = mutableListOf<Streamable.Source>()
+
+                        // 1080p stream
+                        list.add(
+                            Streamable.Source.Http(
+                                request = NetworkRequest(
+                                    url = m3u8Url.replace("master.m3u8", "index-f1-v1-a1.m3u8"),
+                                    headers = mapOf(
+                                        "Referer" to "$baseUrl/",
+                                        "User-Agent" to USER_AGENT,
+                                    ),
+                                ),
+                                type = Streamable.SourceType.HLS,
+                                decryption = null,
+                                quality = 1080,
+                                title = "${language.name} - 1080p",
+                                isVideo = true,
+                                isLive = false,
+                            )
+                        )
+
+                        // 720p stream
+                        list.add(
+                            Streamable.Source.Http(
+                                request = NetworkRequest(
+                                    url = m3u8Url.replace("master.m3u8", "index-f2-v1-a1.m3u8"),
+                                    headers = mapOf(
+                                        "Referer" to "$baseUrl/",
+                                        "User-Agent" to USER_AGENT,
+                                    ),
+                                ),
+                                type = Streamable.SourceType.HLS,
+                                decryption = null,
+                                quality = 720,
+                                title = "${language.name} - 720p",
+                                isVideo = true,
+                                isLive = false,
+                            )
+                        )
+
+                        // 360p stream
+                        list.add(
+                            Streamable.Source.Http(
+                                request = NetworkRequest(
+                                    url = m3u8Url.replace("master.m3u8", "index-f3-v1-a1.m3u8"),
+                                    headers = mapOf(
+                                        "Referer" to "$baseUrl/",
+                                        "User-Agent" to USER_AGENT,
+                                    ),
+                                ),
+                                type = Streamable.SourceType.HLS,
+                                decryption = null,
+                                quality = 360,
+                                title = "${language.name} - 360p",
+                                isVideo = true,
+                                isLive = false,
+                            )
+                        )
+
+                        // Auto / Multi-bitrate master stream
+                        list.add(
                             Streamable.Source.Http(
                                 request = NetworkRequest(
                                     url = m3u8Url,
@@ -432,11 +492,13 @@ class AniDBExtension :
                                 type = Streamable.SourceType.HLS,
                                 decryption = null,
                                 quality = 1080,
-                                title = "${language.name} - Multi-Quality (HLS)",
+                                title = "${language.name} - Auto",
                                 isVideo = true,
                                 isLive = false,
                             )
                         )
+
+                        list
                     } catch (e: Exception) {
                         emptyList()
                     }
@@ -694,18 +756,18 @@ class AniDBExtension :
         qualityOrder.add(qualityPref)
         if ("1080p" != qualityPref) qualityOrder.add("1080p")
         if ("720p" != qualityPref) qualityOrder.add("720p")
-        qualityOrder.add("480p")
         if ("360p" != qualityPref) qualityOrder.add("360p")
+        if ("Auto" != qualityPref) qualityOrder.add("Auto")
 
         val langOrder = mutableListOf(primaryLang, secondaryLang)
 
-        val idealOrder = qualityOrder.flatMap { res ->
-            langOrder.map { lang -> "$lang - $res" }
+        val idealOrder = langOrder.flatMap { lang ->
+            qualityOrder.map { res -> "$lang - $res" }
         }
 
         return sources.sortedBy { src ->
             val title = src.title ?: ""
-            val idx = idealOrder.indexOfFirst { title.startsWith(it) }
+            val idx = idealOrder.indexOfFirst { title.startsWith(it, ignoreCase = true) }
             if (idx != -1) idx else Int.MAX_VALUE
         }
     }
