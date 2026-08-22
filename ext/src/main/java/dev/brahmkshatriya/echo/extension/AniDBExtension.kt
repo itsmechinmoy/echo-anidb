@@ -501,21 +501,51 @@ class AniDBExtension :
         val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L } ?: aniZipEp?.length?.let { it * 60 * 1000L } ?: track.duration
         val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate() ?: track.releaseDate
 
+        val streamables = mutableListOf<Streamable>()
+
+        try {
+            val languagesJson = httpGet("$baseUrl/api/frontend/episode/$epId/languages", isApi = true)
+            val languages = json.decodeFromString<LanguageResponseDto>(languagesJson).languages
+
+            languages.forEachIndexed { index, lang ->
+                val isJapanese = lang.name.contains("Japanese", ignoreCase = true) || lang.code == "jpn"
+                val quality = if (isJapanese) 1080 else 1000 - index
+                streamables.add(
+                    Streamable.server(
+                        id = "server_${epId}_${lang.code ?: lang.name}",
+                        quality = quality,
+                        title = "${lang.name} (Audio)",
+                        extras = mapOf(
+                            "episodeId" to epId,
+                            "embedUrl" to lang.embedUrl,
+                            "langName" to lang.name,
+                            "animeId" to (animeId ?: "")
+                        )
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            // Ignore and use default fallback
+        }
+
+        if (streamables.isEmpty()) {
+            streamables.add(
+                Streamable.server(
+                    id = epId,
+                    quality = 1080,
+                    title = "AniDB Stream",
+                    extras = mapOf("episodeId" to epId, "animeId" to (animeId ?: ""))
+                )
+            )
+        }
+
         return track.copy(
             title = epTitle,
             cover = epCover,
             description = epDescription,
             duration = epDuration,
             releaseDate = epReleaseDate,
-            streamables = mutableListOf(
-                Streamable(
-                    id = epId,
-                    title = "AniDB Stream",
-                    quality = 1080,
-                    type = Streamable.MediaType.Server,
-                    extras = mapOf("episodeId" to epId),
-                )
-            ),
+            streamables = streamables,
         )
     }
 
@@ -523,9 +553,30 @@ class AniDBExtension :
         streamable: Streamable,
         isDownload: Boolean,
     ): Streamable.Media {
-        val episodeId = streamable.extras["episodeId"] ?: streamable.id
+        val episodeId = streamable.extras["episodeId"] ?: streamable.id.removePrefix("server_").substringBefore("_")
+        val specificEmbedUrl = streamable.extras["embedUrl"]
+        val specificLangName = streamable.extras["langName"]
 
-        // Check cached stream sources for instant loading
+        // If a specific language server was selected
+        if (!specificEmbedUrl.isNullOrBlank() && !specificLangName.isNullOrBlank()) {
+            val cacheKey = "${episodeId}_${specificLangName}"
+            val cached = streamSourcesCache.get(cacheKey)
+            if (!cached.isNullOrEmpty()) {
+                return Streamable.Media.Server(sources = cached, merged = false)
+            }
+
+            val embedHtml = httpGet(specificEmbedUrl)
+            val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
+                ?: DIRECT_M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
+                ?: throw Exception("Failed to extract stream URL for $specificLangName")
+
+            val sources = extractHlsSources(m3u8Url, specificLangName)
+            val sortedSources = sortSources(sources)
+            streamSourcesCache.put(cacheKey, sortedSources)
+            return Streamable.Media.Server(sources = sortedSources, merged = false)
+        }
+
+        // Otherwise load all languages and combine them
         val cached = streamSourcesCache.get(episodeId)
         if (!cached.isNullOrEmpty()) {
             return Streamable.Media.Server(sources = cached, merged = false)
@@ -543,105 +594,7 @@ class AniDBExtension :
                             ?: DIRECT_M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
                             ?: return@async emptyList<Streamable.Source>()
 
-                        val list = mutableListOf<Streamable.Source>()
-
-                        if (m3u8Url.contains("master.m3u8")) {
-                            // 1080p stream
-                            list.add(
-                                Streamable.Source.Http(
-                                    request = NetworkRequest(
-                                        url = m3u8Url.replace("master.m3u8", "index-f1-v1-a1.m3u8"),
-                                        headers = mapOf(
-                                            "Referer" to "$baseUrl/",
-                                            "User-Agent" to USER_AGENT,
-                                        ),
-                                    ),
-                                    type = Streamable.SourceType.HLS,
-                                    decryption = null,
-                                    quality = 1080,
-                                    title = "${language.name} - 1080p",
-                                    isVideo = true,
-                                    isLive = false,
-                                )
-                            )
-
-                            // 720p stream
-                            list.add(
-                                Streamable.Source.Http(
-                                    request = NetworkRequest(
-                                        url = m3u8Url.replace("master.m3u8", "index-f2-v1-a1.m3u8"),
-                                        headers = mapOf(
-                                            "Referer" to "$baseUrl/",
-                                            "User-Agent" to USER_AGENT,
-                                        ),
-                                    ),
-                                    type = Streamable.SourceType.HLS,
-                                    decryption = null,
-                                    quality = 720,
-                                    title = "${language.name} - 720p",
-                                    isVideo = true,
-                                    isLive = false,
-                                )
-                            )
-
-                            // 360p stream
-                            list.add(
-                                Streamable.Source.Http(
-                                    request = NetworkRequest(
-                                        url = m3u8Url.replace("master.m3u8", "index-f3-v1-a1.m3u8"),
-                                        headers = mapOf(
-                                            "Referer" to "$baseUrl/",
-                                            "User-Agent" to USER_AGENT,
-                                        ),
-                                    ),
-                                    type = Streamable.SourceType.HLS,
-                                    decryption = null,
-                                    quality = 360,
-                                    title = "${language.name} - 360p",
-                                    isVideo = true,
-                                    isLive = false,
-                                )
-                            )
-
-                            // Auto / Multi-bitrate master stream
-                            list.add(
-                                Streamable.Source.Http(
-                                    request = NetworkRequest(
-                                        url = m3u8Url,
-                                        headers = mapOf(
-                                            "Referer" to "$baseUrl/",
-                                            "User-Agent" to USER_AGENT,
-                                        ),
-                                    ),
-                                    type = Streamable.SourceType.HLS,
-                                    decryption = null,
-                                    quality = 1080,
-                                    title = "${language.name} - Auto",
-                                    isVideo = true,
-                                    isLive = false,
-                                )
-                            )
-                        } else {
-                            list.add(
-                                Streamable.Source.Http(
-                                    request = NetworkRequest(
-                                        url = m3u8Url,
-                                        headers = mapOf(
-                                            "Referer" to "$baseUrl/",
-                                            "User-Agent" to USER_AGENT,
-                                        ),
-                                    ),
-                                    type = if (m3u8Url.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
-                                    decryption = null,
-                                    quality = 1080,
-                                    title = "${language.name} - Default",
-                                    isVideo = true,
-                                    isLive = false,
-                                )
-                            )
-                        }
-
-                        list
+                        extractHlsSources(m3u8Url, language.name)
                     } catch (e: Exception) {
                         emptyList()
                     }
@@ -655,6 +608,89 @@ class AniDBExtension :
         }
         streamSourcesCache.put(episodeId, sortedSources)
         return Streamable.Media.Server(sources = sortedSources, merged = false)
+    }
+
+    private suspend fun extractHlsSources(
+        masterUrl: String,
+        languageName: String,
+        referer: String = "$baseUrl/",
+    ): List<Streamable.Source> {
+        val headers = mapOf(
+            "Referer" to referer,
+            "Origin" to "https://${referer.toHttpUrlOrNull()?.host ?: "anidb.app"}",
+            "User-Agent" to USER_AGENT,
+            "Accept" to "*/*"
+        )
+
+        val masterContent = try {
+            httpGet(masterUrl)
+        } catch (e: Exception) {
+            return listOf(
+                Streamable.Source.Http(
+                    request = NetworkRequest(url = masterUrl, headers = headers),
+                    type = if (masterUrl.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
+                    quality = 1080,
+                    title = "$languageName - Auto",
+                    isVideo = true
+                )
+            )
+        }
+
+        if ("#EXT-X-STREAM-INF:" !in masterContent) {
+            return listOf(
+                Streamable.Source.Http(
+                    request = NetworkRequest(url = masterUrl, headers = headers),
+                    type = if (masterUrl.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
+                    quality = 1080,
+                    title = "$languageName - Stream",
+                    isVideo = true
+                )
+            )
+        }
+
+        val sources = mutableListOf<Streamable.Source>()
+
+        // Add Master / Adaptive Auto stream
+        sources.add(
+            Streamable.Source.Http(
+                request = NetworkRequest(url = masterUrl, headers = headers),
+                type = Streamable.SourceType.HLS,
+                quality = 1080,
+                title = "$languageName - Auto",
+                isVideo = true
+            )
+        )
+
+        // Parse variant streams from #EXT-X-STREAM-INF:
+        val entries = masterContent.substringAfter("#EXT-X-STREAM-INF:").split("#EXT-X-STREAM-INF:")
+        for (entry in entries) {
+            val lines = entry.trim().lines()
+            val streamInf = lines.firstOrNull() ?: continue
+            val urlLine = lines.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+
+            val streamUrl = if (urlLine.startsWith("http://") || urlLine.startsWith("https://")) {
+                urlLine
+            } else {
+                val baseUri = masterUrl.substringBeforeLast("/")
+                "$baseUri/$urlLine"
+            }
+
+            val resMatch = Regex("""RESOLUTION=(\d+)x(\d+)""").find(streamInf)
+            val height = resMatch?.groupValues?.get(2)?.toIntOrNull()
+            val qualityName = if (height != null) "${height}p" else "Variant"
+
+            sources.add(
+                Streamable.Source.Http(
+                    request = NetworkRequest(url = streamUrl, headers = headers),
+                    type = Streamable.SourceType.HLS,
+                    quality = height ?: 1080,
+                    title = "$languageName - $qualityName",
+                    isVideo = true
+                )
+            )
+        }
+
+        return sources.distinctBy { it.id }
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
