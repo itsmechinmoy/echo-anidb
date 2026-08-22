@@ -745,7 +745,7 @@ class AniDBExtension :
                 Lyrics.Item(
                     text = "▶ ${ch.name}",
                     startTime = ch.startTime,
-                    endTime = ch.endTime
+                    endTime = ch.endTime ?: (ch.startTime + 90000L)
                 )
             }
             list.add(
