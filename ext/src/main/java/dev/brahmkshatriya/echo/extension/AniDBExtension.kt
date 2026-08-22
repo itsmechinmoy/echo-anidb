@@ -11,6 +11,7 @@ import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
+import dev.brahmkshatriya.echo.common.models.Date
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
@@ -113,6 +114,7 @@ class AniDBExtension :
     private val animeDetailsCache = MemoryCache<String, Album>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
     private val episodesCache = MemoryCache<String, List<EpisodeDto>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
     private val streamSourcesCache = MemoryCache<String, List<Streamable.Source>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
+    private val aniZipCache = MemoryCache<String, AniZipResponseDto>(ttlMillis = 30 * 60 * 1000L, maxEntries = 100)
 
     private var setting: Settings? = null
 
@@ -253,6 +255,45 @@ class AniDBExtension :
             parsed
         }
 
+        val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
+            album
+        } else {
+            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId") ?: try {
+                val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
+                fetchAnimeDetails(fullUrl, album)
+            } catch (e: Exception) {
+                album
+            }
+        }
+
+        // Fetch Ani.zip mappings for real episode titles, screencaps/thumbnails, synopsis, etc.
+        val aniZipMeta = try {
+            val anilistId = resolvedAlbum.extras["anilist_id"]
+            val anidbId = resolvedAlbum.extras["anidb_id"]
+            val malId = resolvedAlbum.extras["mal_id"]
+            val kitsuId = resolvedAlbum.extras["kitsu_id"]
+
+            val param = when {
+                anilistId != null -> "anilist_id=$anilistId"
+                anidbId != null -> "anidb_id=$anidbId"
+                malId != null -> "mal_id=$malId"
+                kitsuId != null -> "kitsu_id=$kitsuId"
+                else -> null
+            }
+
+            if (param != null) {
+                aniZipCache.get(param) ?: run {
+                    val url = "https://api.ani.zip/mappings?$param"
+                    val jsonStr = httpGet(url, isApi = true)
+                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
+                    aniZipCache.put(param, parsed)
+                    parsed
+                }
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+
         val minEpNumber = episodesArr.minOfOrNull { it.number.toFloat() } ?: 0f
         val offset = if (minEpNumber > 1f) minEpNumber - 1f else 0f
 
@@ -262,16 +303,41 @@ class AniDBExtension :
         val tracks = episodesArr
             .filter { !hideFiller || !it.filler }
             .map { ep ->
-                val epTitle = ep.getFormattedTitle(offset, showFillerTag)
                 val epNumber = ep.getAdjustedNumber(offset)
+                val epNumberInt = epNumber.toInt()
+                val epNumberStr = if (epNumber == epNumberInt.toFloat()) epNumberInt.toString() else epNumber.toString()
+
+                val aniZipEp = aniZipMeta?.episodes?.get(epNumberStr)
+                    ?: aniZipMeta?.episodes?.get(ep.number.toInt().toString())
+
+                val aniZipTitle = aniZipEp?.getEnglishOrRomajiTitle()
+                val baseTitle = ep.getFormattedTitle(offset, showFillerTag)
+                val epTitle = if (!aniZipTitle.isNullOrBlank()) {
+                    "$baseTitle: $aniZipTitle"
+                } else {
+                    baseTitle
+                }
+
+                val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder()
+                    ?: resolvedAlbum.cover
+                    ?: album.cover
+
+                val epDescription = aniZipEp?.overview ?: aniZipEp?.summary
+                val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L }
+                    ?: aniZipEp?.length?.let { it * 60 * 1000L }
+                val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate()
+
                 val epId = ep.id.toString()
                 Track(
                     id = epId,
                     title = epTitle,
                     type = Track.Type.Video,
-                    cover = album.cover,
-                    album = album,
-                    artists = album.artists,
+                    cover = epCover,
+                    album = resolvedAlbum,
+                    artists = resolvedAlbum.artists,
+                    duration = epDuration,
+                    releaseDate = epReleaseDate,
+                    description = epDescription,
                     streamables = mutableListOf(
                         Streamable(
                             id = epId,
@@ -560,6 +626,27 @@ class AniDBExtension :
 
         val id = baseAlbum?.id ?: (url.toHttpUrlOrNull()?.encodedPath ?: url)
 
+        val extras = mutableMapOf<String, String>()
+        baseAlbum?.extras?.let { extras.putAll(it) }
+
+        document.select("div[class*='gap-2'].mb-4 a[target=_blank], a[href*='anilist.co'], a[href*='myanimelist.net'], a[href*='anidb.net'], a[href*='kitsu.']").forEach { a ->
+            val href = a.attr("href")
+            when {
+                href.contains("anilist.co/anime/") -> {
+                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["anilist_id"] = it }
+                }
+                href.contains("myanimelist.net/anime/") -> {
+                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["mal_id"] = it }
+                }
+                href.contains("anidb.net/anime/") -> {
+                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["anidb_id"] = it }
+                }
+                href.contains("kitsu.app/anime/") || href.contains("kitsu.io/anime/") -> {
+                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["kitsu_id"] = it }
+                }
+            }
+        }
+
         val album = Album(
             id = id,
             title = title,
@@ -567,6 +654,7 @@ class AniDBExtension :
             cover = cover,
             artists = artists,
             description = fullDescription,
+            extras = extras,
         )
         animeDetailsCache.put(url, album)
         return album
@@ -641,6 +729,16 @@ class AniDBExtension :
                 throw Exception("HTTP error ${response.code} for URL: $url")
             }
             response.body?.string() ?: ""
+        }
+    }
+
+    private fun String.toEchoDate(): Date? {
+        return try {
+            val parts = this.split("-").mapNotNull { it.toIntOrNull() }
+            if (parts.isEmpty()) null
+            else Date(parts[0], parts.getOrNull(1), parts.getOrNull(2))
+        } catch (e: Exception) {
+            null
         }
     }
 
