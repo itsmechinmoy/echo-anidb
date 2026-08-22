@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.extension
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 @Serializable
 data class EpisodeResponseDto(
@@ -47,4 +48,41 @@ data class LanguageDto(
     val name: String,
     val code: String? = null,
     @SerialName("embed_url") val embedUrl: String,
+)
+
+@Serializable
+data class AniZipResponseDto(
+    val titles: Map<String, String?> = emptyMap(),
+    val episodes: Map<String, AniZipEpisodeDto> = emptyMap(),
+    val images: List<AniZipImageDto> = emptyList(),
+    val mappings: Map<String, JsonElement?> = emptyMap(),
+)
+
+@Serializable
+data class AniZipEpisodeDto(
+    @SerialName("tvdbId") val tvdbId: Long? = null,
+    val title: Map<String, String?> = emptyMap(),
+    @SerialName("airDate") val airDate: String? = null,
+    val airdate: String? = null,
+    val runtime: Long? = null,
+    val length: Long? = null,
+    val overview: String? = null,
+    val summary: String? = null,
+    val image: String? = null,
+    val rating: String? = null,
+    val episode: String? = null,
+    @SerialName("episodeNumber") val episodeNumber: Long? = null,
+    @SerialName("seasonNumber") val seasonNumber: Long? = null,
+) {
+    fun getEnglishOrRomajiTitle(): String? {
+        return title["en"]?.takeIf { it.isNotBlank() }
+            ?: title["x-jat"]?.takeIf { it.isNotBlank() }
+            ?: title["ja"]?.takeIf { it.isNotBlank() }
+    }
+}
+
+@Serializable
+data class AniZipImageDto(
+    val coverType: String? = null,
+    val url: String? = null,
 )
