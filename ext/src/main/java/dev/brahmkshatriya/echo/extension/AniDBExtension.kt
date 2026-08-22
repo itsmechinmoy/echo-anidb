@@ -6,11 +6,13 @@ import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
 import dev.brahmkshatriya.echo.common.clients.QuickSearchClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.ShareClient
+import dev.brahmkshatriya.echo.common.clients.TrackChapterClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
+import dev.brahmkshatriya.echo.common.models.Chapter
 import dev.brahmkshatriya.echo.common.models.Date
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
@@ -28,10 +30,13 @@ import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -83,6 +88,7 @@ class AniDBExtension :
     QuickSearchClient,
     AlbumClient,
     TrackClient,
+    TrackChapterClient,
     ShareClient {
 
     val baseUrl = "https://anidb.app"
@@ -115,6 +121,8 @@ class AniDBExtension :
     private val episodesCache = MemoryCache<String, List<EpisodeDto>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
     private val streamSourcesCache = MemoryCache<String, List<Streamable.Source>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
     private val aniZipCache = MemoryCache<String, AniZipResponseDto>(ttlMillis = 30 * 60 * 1000L, maxEntries = 100)
+    private val chaptersCache = MemoryCache<String, List<Chapter>>(ttlMillis = 30 * 60 * 1000L, maxEntries = 100)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var setting: Settings? = null
 
@@ -157,6 +165,12 @@ class AniDBExtension :
                 title = PREF_FILLER_HIDE_TITLE,
                 summary = "Hides detected filler episodes from episode list.",
                 defaultValue = PREF_FILLER_HIDE_DEFAULT,
+            ),
+            SettingSwitch(
+                key = PREF_AUTOSKIP_KEY,
+                title = PREF_AUTOSKIP_TITLE,
+                summary = "Automatically skip Opening and Ending segments without asking.",
+                defaultValue = PREF_AUTOSKIP_DEFAULT,
             ),
         )
     }
@@ -243,6 +257,66 @@ class AniDBExtension :
         return fetchAnimeDetails(path, album)
     }
 
+    private fun getAniZipMeta(album: Album, animeId: String): AniZipResponseDto? {
+        val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
+            album
+        } else {
+            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId")
+        }
+
+        val anilistId = resolvedAlbum?.extras?.get("anilist_id")
+        val anidbId = resolvedAlbum?.extras?.get("anidb_id")
+        val malId = resolvedAlbum?.extras?.get("mal_id")
+        val kitsuId = resolvedAlbum?.extras?.get("kitsu_id")
+
+        val param = when {
+            anilistId != null -> "anilist_id=$anilistId"
+            anidbId != null -> "anidb_id=$anidbId"
+            malId != null -> "mal_id=$malId"
+            kitsuId != null -> "kitsu_id=$kitsuId"
+            else -> null
+        } ?: return null
+
+        return aniZipCache.get(param)
+    }
+
+    private fun prefetchAniZipMeta(album: Album, animeId: String) {
+        scope.launch {
+            try {
+                val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
+                    album
+                } else {
+                    animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId") ?: run {
+                        val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
+                        fetchAnimeDetails(fullUrl, album)
+                    }
+                }
+
+                val anilistId = resolvedAlbum.extras["anilist_id"]
+                val anidbId = resolvedAlbum.extras["anidb_id"]
+                val malId = resolvedAlbum.extras["mal_id"]
+                val kitsuId = resolvedAlbum.extras["kitsu_id"]
+
+                val param = when {
+                    anilistId != null -> "anilist_id=$anilistId"
+                    anidbId != null -> "anidb_id=$anidbId"
+                    malId != null -> "mal_id=$malId"
+                    kitsuId != null -> "kitsu_id=$kitsuId"
+                    else -> null
+                } ?: return@launch
+
+                if (aniZipCache.get(param) == null) {
+                    val url = "https://api.ani.zip/mappings?$param"
+                    val jsonStr = httpGet(url, isApi = true)
+                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
+                    aniZipCache.put(param, parsed)
+                }
+            } catch (e: Exception) {
+                // Background prefetch error ignored
+            }
+        }
+    }
+
     override suspend fun loadTracks(album: Album): Feed<Track> = PagedData.Single<Track> {
         val path = album.id
         val lastSegment = (if (path.startsWith("http")) path else "$baseUrl$path").toHttpUrl().pathSegments.lastOrNull() ?: path
@@ -255,44 +329,40 @@ class AniDBExtension :
             parsed
         }
 
+        // Fast AniZip resolution: already cached from fetchAnimeDetails or fetched within 800ms
         val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
             album
         } else {
-            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId") ?: try {
-                withTimeoutOrNull(4000L) {
-                    val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
-                    fetchAnimeDetails(fullUrl, album)
-                } ?: album
-            } catch (e: Exception) {
-                album
-            }
+            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId")
         }
 
-        // Fetch Ani.zip mappings for real episode titles, screencaps/thumbnails, synopsis, etc.
-        val aniZipMeta = try {
-            val anilistId = resolvedAlbum.extras["anilist_id"]
-            val anidbId = resolvedAlbum.extras["anidb_id"]
-            val malId = resolvedAlbum.extras["mal_id"]
-            val kitsuId = resolvedAlbum.extras["kitsu_id"]
+        val anilistId = resolvedAlbum?.extras?.get("anilist_id") ?: album.extras["anilist_id"]
+        val anidbId = resolvedAlbum?.extras?.get("anidb_id") ?: album.extras["anidb_id"]
+        val malId = resolvedAlbum?.extras?.get("mal_id") ?: album.extras["mal_id"]
+        val kitsuId = resolvedAlbum?.extras?.get("kitsu_id") ?: album.extras["kitsu_id"]
 
-            val param = when {
-                anilistId != null -> "anilist_id=$anilistId"
-                anidbId != null -> "anidb_id=$anidbId"
-                malId != null -> "mal_id=$malId"
-                kitsuId != null -> "kitsu_id=$kitsuId"
-                else -> null
-            }
+        val param = when {
+            anilistId != null -> "anilist_id=$anilistId"
+            anidbId != null -> "anidb_id=$anidbId"
+            malId != null -> "mal_id=$malId"
+            kitsuId != null -> "kitsu_id=$kitsuId"
+            else -> null
+        }
 
-            if (param != null) {
-                aniZipCache.get(param) ?: withTimeoutOrNull(4000L) {
+        val aniZipMeta = if (param != null) {
+            aniZipCache.get(param) ?: try {
+                withTimeoutOrNull(800L) {
                     val url = "https://api.ani.zip/mappings?$param"
                     val jsonStr = httpGet(url, isApi = true)
                     val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
                     aniZipCache.put(param, parsed)
                     parsed
                 }
-            } else null
-        } catch (e: Exception) {
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            prefetchAniZipMeta(album, animeId)
             null
         }
 
@@ -322,7 +392,6 @@ class AniDBExtension :
                 }
 
                 val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder()
-                    ?: resolvedAlbum.cover
                     ?: album.cover
 
                 val epDescription = aniZipEp?.overview ?: aniZipEp?.summary
@@ -336,8 +405,8 @@ class AniDBExtension :
                     title = epTitle,
                     type = Track.Type.Video,
                     cover = epCover,
-                    album = resolvedAlbum,
-                    artists = resolvedAlbum.artists,
+                    album = album,
+                    artists = album.artists,
                     duration = epDuration,
                     releaseDate = epReleaseDate,
                     description = epDescription,
@@ -385,7 +454,56 @@ class AniDBExtension :
 
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         val epId = track.extras["episodeId"] ?: track.id
+        val animeId = track.extras["animeId"] ?: ""
+        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString() ?: ""
+
+        val aniZipMeta = if (animeId.isNotEmpty()) {
+            track.album?.let { getAniZipMeta(it, animeId) } ?: try {
+                val anilistId = track.album?.extras?.get("anilist_id")
+                val anidbId = track.album?.extras?.get("anidb_id")
+                val malId = track.album?.extras?.get("mal_id")
+                val kitsuId = track.album?.extras?.get("kitsu_id")
+                val param = when {
+                    anilistId != null -> "anilist_id=$anilistId"
+                    anidbId != null -> "anidb_id=$anidbId"
+                    malId != null -> "mal_id=$malId"
+                    kitsuId != null -> "kitsu_id=$kitsuId"
+                    else -> null
+                }
+                if (param != null) {
+                    aniZipCache.get(param) ?: withTimeoutOrNull(3000L) {
+                        val url = "https://api.ani.zip/mappings?$param"
+                        val jsonStr = httpGet(url, isApi = true)
+                        val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
+                        aniZipCache.put(param, parsed)
+                        parsed
+                    }
+                } else null
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+
+        val aniZipEp = aniZipMeta?.episodes?.get(epNumberStr)
+        val aniZipTitle = aniZipEp?.getEnglishOrRomajiTitle()
+        val epTitle = if (!aniZipTitle.isNullOrBlank()) {
+            val numLabel = track.extras["number"]?.removeSuffix(".0") ?: ""
+            if (numLabel.isNotEmpty()) "$numLabel: $aniZipTitle" else aniZipTitle
+        } else {
+            track.title
+        }
+
+        val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder() ?: track.cover
+        val epDescription = aniZipEp?.overview ?: aniZipEp?.summary ?: track.description
+        val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L } ?: aniZipEp?.length?.let { it * 60 * 1000L } ?: track.duration
+        val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate() ?: track.releaseDate
+
         return track.copy(
+            title = epTitle,
+            cover = epCover,
+            description = epDescription,
+            duration = epDuration,
+            releaseDate = epReleaseDate,
             streamables = mutableListOf(
                 Streamable(
                     id = epId,
@@ -394,7 +512,7 @@ class AniDBExtension :
                     type = Streamable.MediaType.Server,
                     extras = mapOf("episodeId" to epId),
                 )
-            )
+            ),
         )
     }
 
@@ -514,6 +632,61 @@ class AniDBExtension :
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
+
+    // =========================== Chapter Client ===========================
+
+    override suspend fun getChapters(track: Track): List<Chapter> {
+        val animeId = track.extras["animeId"] ?: return emptyList()
+        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString() ?: return emptyList()
+        val cacheKey = "$animeId:$epNumberStr"
+
+        val cached = chaptersCache.get(cacheKey)
+        if (cached != null) return cached
+
+        val autoSkip = setting?.getBoolean(PREF_AUTOSKIP_KEY) ?: PREF_AUTOSKIP_DEFAULT
+
+        val anilistId = track.album?.extras?.get("anilist_id")
+            ?: animeDetailsCache.get(track.album?.id ?: "")?.extras?.get("anilist_id")
+            ?: animeDetailsCache.get("$baseUrl/anime/$animeId")?.extras?.get("anilist_id")
+
+        val malId = track.album?.extras?.get("mal_id")
+            ?: animeDetailsCache.get(track.album?.id ?: "")?.extras?.get("mal_id")
+            ?: animeDetailsCache.get("$baseUrl/anime/$animeId")?.extras?.get("mal_id")
+
+        val targetId = malId ?: anilistId ?: return emptyList()
+
+        val chapters = try {
+            val url = "https://api.aniskip.com/v2/skip-times/$targetId/$epNumberStr?types[]=op&types[]=ed&types[]=mixed-op&types[]=mixed-ed&types[]=recap&episodeLength=0"
+            val jsonStr = httpGet(url, isApi = true)
+            val parsed = json.decodeFromString<AniSkipResponseDto>(jsonStr)
+            if (!parsed.found || parsed.results.isEmpty()) emptyList()
+            else {
+                parsed.results.map { res ->
+                    val name = when (res.skipType.lowercase()) {
+                        "op" -> "Opening"
+                        "ed" -> "Ending"
+                        "mixed-op" -> "Mixed Opening"
+                        "mixed-ed" -> "Mixed Ending"
+                        "recap" -> "Recap"
+                        else -> res.skipType.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.ROOT) else it.toString() }
+                    }
+                    Chapter(
+                        name = name,
+                        startTime = (res.interval.startTime * 1000).toLong(),
+                        endTime = (res.interval.endTime * 1000).toLong(),
+                        skipType = if (autoSkip) Chapter.SkipType.SKIP else Chapter.SkipType.ASK,
+                    )
+                }.sortedBy { it.startTime }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+
+        if (chapters.isNotEmpty()) {
+            chaptersCache.put(cacheKey, chapters)
+        }
+        return chapters
+    }
 
     // ============================== Share Client ==========================
 
@@ -720,6 +893,30 @@ class AniDBExtension :
             extras = extras,
         )
         animeDetailsCache.put(url, album)
+
+        val anilistId = extras["anilist_id"]
+        val anidbId = extras["anidb_id"]
+        val malId = extras["mal_id"]
+        val kitsuId = extras["kitsu_id"]
+        val param = when {
+            anilistId != null -> "anilist_id=$anilistId"
+            anidbId != null -> "anidb_id=$anidbId"
+            malId != null -> "mal_id=$malId"
+            kitsuId != null -> "kitsu_id=$kitsuId"
+            else -> null
+        }
+        if (param != null && aniZipCache.get(param) == null) {
+            scope.launch {
+                try {
+                    val jsonStr = httpGet("https://api.ani.zip/mappings?$param", isApi = true)
+                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
+                    aniZipCache.put(param, parsed)
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
+        }
+
         return album
     }
 
@@ -823,6 +1020,10 @@ class AniDBExtension :
         private const val PREF_FILLER_HIDE_KEY = "hide_filler"
         private const val PREF_FILLER_HIDE_TITLE = "Hide Filler Episodes"
         private const val PREF_FILLER_HIDE_DEFAULT = false
+
+        private const val PREF_AUTOSKIP_KEY = "auto_skip_op_ed"
+        private const val PREF_AUTOSKIP_TITLE = "Auto-Skip OP/ED"
+        private const val PREF_AUTOSKIP_DEFAULT = false
 
         private val ANIME_ID_REGEX = Regex("-(\\d+)$")
         private val M3U8_REGEX = Regex("""file:\s*['"](https?://[^'"]+master\.m3u8)['"]""")
