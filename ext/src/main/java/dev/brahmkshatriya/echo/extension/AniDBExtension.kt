@@ -32,6 +32,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -41,6 +42,38 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
+
+class MemoryCache<K : Any, V : Any>(
+    private val ttlMillis: Long = 5 * 60 * 1000L,
+    private val maxEntries: Int = 100
+) {
+    private data class Entry<V>(val value: V, val timestamp: Long)
+    private val map = object : LinkedHashMap<K, Entry<V>>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, Entry<V>>?): Boolean {
+            return size > maxEntries
+        }
+    }
+
+    @Synchronized
+    fun get(key: K): V? {
+        val entry = map[key] ?: return null
+        if (System.currentTimeMillis() - entry.timestamp > ttlMillis) {
+            map.remove(key)
+            return null
+        }
+        return entry.value
+    }
+
+    @Synchronized
+    fun put(key: K, value: V) {
+        map[key] = Entry(value, System.currentTimeMillis())
+    }
+
+    @Synchronized
+    fun clear() {
+        map.clear()
+    }
+}
 
 class AniDBExtension :
     ExtensionClient,
@@ -60,9 +93,26 @@ class AniDBExtension :
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
+        .dns(object : okhttp3.Dns {
+            override fun lookup(hostname: String): List<java.net.InetAddress> {
+                val addresses = okhttp3.Dns.SYSTEM.lookup(hostname)
+                return addresses.sortedBy { if (it is java.net.Inet4Address) 0 else 1 }
+            }
+        })
+        .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(20, 5, TimeUnit.MINUTES))
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
+
+    private val browseCache = MemoryCache<String, Pair<List<Album>, Boolean>>(ttlMillis = 3 * 60 * 1000L, maxEntries = 50)
+    private val animeDetailsCache = MemoryCache<String, Album>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
+    private val episodesCache = MemoryCache<String, List<EpisodeDto>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
+    private val streamSourcesCache = MemoryCache<String, List<Streamable.Source>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
 
     private var setting: Settings? = null
 
@@ -196,8 +246,12 @@ class AniDBExtension :
         val lastSegment = (if (path.startsWith("http")) path else "$baseUrl$path").toHttpUrl().pathSegments.last()
         val animeId = ANIME_ID_REGEX.find(lastSegment)?.groupValues?.get(1) ?: lastSegment
 
-        val episodesJson = httpGet("$baseUrl/api/frontend/anime/$animeId/episodes")
-        val episodesArr = json.decodeFromString<EpisodeResponseDto>(episodesJson).episodes
+        val episodesArr = episodesCache.get(animeId) ?: run {
+            val episodesJson = httpGet("$baseUrl/api/frontend/anime/$animeId/episodes", isApi = true)
+            val parsed = json.decodeFromString<EpisodeResponseDto>(episodesJson).episodes
+            episodesCache.put(animeId, parsed)
+            parsed
+        }
 
         val minEpNumber = episodesArr.minOfOrNull { it.number.toFloat() } ?: 0f
         val offset = if (minEpNumber > 1f) minEpNumber - 1f else 0f
@@ -282,32 +336,27 @@ class AniDBExtension :
         isDownload: Boolean,
     ): Streamable.Media {
         val episodeId = streamable.extras["episodeId"] ?: streamable.id
-        val languagesJson = httpGet("$baseUrl/api/frontend/episode/$episodeId/languages")
+
+        // Check cached stream sources for instant loading
+        val cached = streamSourcesCache.get(episodeId)
+        if (!cached.isNullOrEmpty()) {
+            return Streamable.Media.Server(sources = cached, merged = false)
+        }
+
+        val languagesJson = httpGet("$baseUrl/api/frontend/episode/$episodeId/languages", isApi = true)
         val languages = json.decodeFromString<LanguageResponseDto>(languagesJson).languages
 
         val sources = coroutineScope {
             languages.map { language ->
-                async(Dispatchers.IO) {
+                async<List<Streamable.Source>>(Dispatchers.IO) {
                     try {
                         val embedHtml = httpGet(language.embedUrl)
-                        val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return@async emptyList()
-                        val masterContent = try {
-                            httpGet(m3u8Url)
-                        } catch (e: Exception) {
-                            ""
-                        }
+                        val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return@async emptyList<Streamable.Source>()
 
-                        val hlsStreams = if (masterContent.isNotEmpty()) {
-                            HlsUtils.parseMasterPlaylist(m3u8Url, masterContent)
-                        } else {
-                            mutableListOf(HlsStream(1080, "1080p", m3u8Url))
-                        }
-
-                        hlsStreams.map { stream ->
-                            val streamTitle = "${language.name} - ${stream.resolutionLabel}"
+                        mutableListOf(
                             Streamable.Source.Http(
                                 request = NetworkRequest(
-                                    url = stream.url,
+                                    url = m3u8Url,
                                     headers = mapOf(
                                         "Referer" to "$baseUrl/",
                                         "User-Agent" to USER_AGENT,
@@ -315,12 +364,12 @@ class AniDBExtension :
                                 ),
                                 type = Streamable.SourceType.HLS,
                                 decryption = null,
-                                quality = stream.quality,
-                                title = streamTitle,
+                                quality = 1080,
+                                title = "${language.name} - Multi-Quality (HLS)",
                                 isVideo = true,
                                 isLive = false,
                             )
-                        }
+                        )
                     } catch (e: Exception) {
                         emptyList()
                     }
@@ -329,6 +378,9 @@ class AniDBExtension :
         }
 
         val sortedSources = sortSources(sources)
+        if (sortedSources.isNotEmpty()) {
+            streamSourcesCache.put(episodeId, sortedSources)
+        }
         return Streamable.Media.Server(sources = sortedSources, merged = false)
     }
 
@@ -354,9 +406,14 @@ class AniDBExtension :
     // ============================= Utilities ==============================
 
     private suspend fun loadBrowsePage(url: String): Pair<List<Album>, Boolean> {
+        val cached = browseCache.get(url)
+        if (cached != null) return cached
+
         val html = httpGet(url)
         val document = Jsoup.parse(html, baseUrl)
-        return parseBrowsePage(document)
+        val result = parseBrowsePage(document)
+        browseCache.put(url, result)
+        return result
     }
 
     private fun parseBrowsePage(document: Document): Pair<List<Album>, Boolean> {
@@ -407,6 +464,9 @@ class AniDBExtension :
     }
 
     private suspend fun fetchAnimeDetails(url: String, baseAlbum: Album? = null): Album {
+        val cached = animeDetailsCache.get(url)
+        if (cached != null) return cached
+
         val html = httpGet(url)
         val document = Jsoup.parse(html, baseUrl)
         val dl = document.selectFirst("dl.grid")
@@ -500,7 +560,7 @@ class AniDBExtension :
 
         val id = baseAlbum?.id ?: (url.toHttpUrlOrNull()?.encodedPath ?: url)
 
-        return Album(
+        val album = Album(
             id = id,
             title = title,
             type = Album.Type.Show,
@@ -508,6 +568,8 @@ class AniDBExtension :
             artists = artists,
             description = fullDescription,
         )
+        animeDetailsCache.put(url, album)
+        return album
     }
 
     private fun parseRelatedAnime(document: Document): List<Album> {
@@ -559,12 +621,18 @@ class AniDBExtension :
         }
     }
 
-    private suspend fun httpGet(url: String): String = withContext(Dispatchers.IO) {
+    private suspend fun httpGet(url: String, isApi: Boolean = false): String = withContext(Dispatchers.IO) {
+        val acceptHeader = if (isApi) {
+            "application/json, text/plain, */*"
+        } else {
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        }
+
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
             .header("Referer", "$baseUrl/")
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+            .header("Accept", acceptHeader)
             .header("Accept-Language", "en-US,en;q=0.5")
             .build()
 
