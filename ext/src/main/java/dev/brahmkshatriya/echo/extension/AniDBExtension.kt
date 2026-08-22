@@ -77,21 +77,21 @@ class AniDBExtension :
     // ============================== Settings ==============================
 
     override suspend fun getSettingItems(): List<Setting> {
-        return listOf(
+        return mutableListOf(
             SettingList(
                 key = PREF_QUALITY_KEY,
                 title = PREF_QUALITY_TITLE,
                 summary = "Preferred video playback quality",
-                entryTitles = listOf("1080p", "720p", "360p"),
-                entryValues = listOf("1080p", "720p", "360p"),
+                entryTitles = mutableListOf("1080p", "720p", "360p"),
+                entryValues = mutableListOf("1080p", "720p", "360p"),
                 defaultEntryIndex = 0,
             ),
             SettingList(
                 key = PREF_LANG_KEY,
                 title = PREF_LANG_TITLE,
                 summary = "Preferred audio language (Dub/Sub)",
-                entryTitles = listOf("Japanese", "English"),
-                entryValues = listOf("jpn", "eng"),
+                entryTitles = mutableListOf("Japanese", "English"),
+                entryValues = mutableListOf("jpn", "eng"),
                 defaultEntryIndex = 0,
             ),
             SettingSwitch(
@@ -112,7 +112,7 @@ class AniDBExtension :
     // ============================== Home Feed =============================
 
     override suspend fun loadHomeFeed(): Feed<Shelf> {
-        val tabs = listOf(
+        val tabs = mutableListOf(
             Tab("order_top_airing", "Top Airing", false),
             Tab("order_trending", "Trending", false),
             Tab("order_updated", "Latest Updates", false),
@@ -140,7 +140,7 @@ class AniDBExtension :
             val url = query.toHttpUrlOrNull()
             if (url != null && (url.host == "anidb.app" || url.host == "anidb.net") && url.pathSegments.contains("anime")) {
                 val album = fetchAnimeDetails(query)
-                return listOf<Shelf>(album.toShelf()).toFeed()
+                return mutableListOf<Shelf>(album.toShelf()).toFeed()
             }
         }
 
@@ -218,7 +218,7 @@ class AniDBExtension :
                     cover = album.cover,
                     album = album,
                     artists = album.artists,
-                    streamables = listOf(
+                    streamables = mutableListOf(
                         Streamable(
                             id = epId,
                             title = "AniDB Stream",
@@ -257,7 +257,7 @@ class AniDBExtension :
             title = "Related & Recommendations",
             list = relatedAlbums,
         )
-        return listOf<Shelf>(shelf).toFeed()
+        return mutableListOf<Shelf>(shelf).toFeed()
     }
 
     // ============================== Track Client ==========================
@@ -265,7 +265,7 @@ class AniDBExtension :
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         val epId = track.extras["episodeId"] ?: track.id
         return track.copy(
-            streamables = listOf(
+            streamables = mutableListOf(
                 Streamable(
                     id = epId,
                     title = "AniDB Stream",
@@ -300,7 +300,7 @@ class AniDBExtension :
                         val hlsStreams = if (masterContent.isNotEmpty()) {
                             HlsUtils.parseMasterPlaylist(m3u8Url, masterContent)
                         } else {
-                            listOf(HlsStream(1080, "1080p", m3u8Url))
+                            mutableListOf(HlsStream(1080, "1080p", m3u8Url))
                         }
 
                         hlsStreams.map { stream ->
@@ -434,12 +434,12 @@ class AniDBExtension :
         val season = dl?.selectFirst("dt:contains(Season) + dd")?.text()
         val duration = dl?.selectFirst("dt:contains(Duration) + dd")?.text()
         val rating = dl?.selectFirst("dt:contains(Rating) + dd")?.text()
-        val metaLine1 = listOfNotNull(
-            type?.let { "**Type:** $it" },
-            season?.let { "**Season:** $it" },
-            duration?.let { "**Duration:** $it" },
-            rating?.let { "**Rating:** $it" },
-        ).joinToString(" | ")
+        val metaParts = mutableListOf<String>()
+        type?.let { metaParts.add("**Type:** $it") }
+        season?.let { metaParts.add("**Season:** $it") }
+        duration?.let { metaParts.add("**Duration:** $it") }
+        rating?.let { metaParts.add("**Rating:** $it") }
+        val metaLine1 = metaParts.joinToString(" | ")
 
         val airedRaw = dl?.selectFirst("dt:contains(Aired) + dd")?.text()
         val metaLine2 = if (airedRaw != null) {
@@ -461,7 +461,7 @@ class AniDBExtension :
         val synopsis = document.select("h2:contains(Synopsis) + div p")
             .joinToString("\n\n") { it.text() }
 
-        val allowedDomains = listOf("myanimelist.net", "anilist.co", "anidb.net", "kitsu.app")
+        val allowedDomains = mutableListOf("myanimelist.net", "anilist.co", "anidb.net", "kitsu.app")
         val links = document.select("div[class*='gap-2'].mb-4 a[target=_blank]")
             .filter { a ->
                 val href = a.attr("href").lowercase()
@@ -495,7 +495,8 @@ class AniDBExtension :
         }.trim()
 
         val studioName = dl?.selectFirst("dt:contains(Studios) + dd a, dt:contains(Studio) + dd a")?.text()
-        val artists = listOfNotNull(studioName?.let { Artist(id = it, name = it, cover = null) })
+        val artists = mutableListOf<Artist>()
+        studioName?.let { artists.add(Artist(id = it, name = it, cover = null)) }
 
         val id = baseAlbum?.id ?: (url.toHttpUrlOrNull()?.encodedPath ?: url)
 
@@ -538,15 +539,14 @@ class AniDBExtension :
         val primaryLang = if (langPref == "eng") "English" else "Japanese"
         val secondaryLang = if (langPref == "eng") "Japanese" else "English"
 
-        val qualityOrder = listOfNotNull(
-            qualityPref,
-            "1080p".takeIf { it != qualityPref },
-            "720p".takeIf { it != qualityPref },
-            "480p",
-            "360p".takeIf { it != qualityPref },
-        )
+        val qualityOrder = mutableListOf<String>()
+        qualityOrder.add(qualityPref)
+        if ("1080p" != qualityPref) qualityOrder.add("1080p")
+        if ("720p" != qualityPref) qualityOrder.add("720p")
+        qualityOrder.add("480p")
+        if ("360p" != qualityPref) qualityOrder.add("360p")
 
-        val langOrder = listOf(primaryLang, secondaryLang)
+        val langOrder = mutableListOf(primaryLang, secondaryLang)
 
         val idealOrder = qualityOrder.flatMap { res ->
             langOrder.map { lang -> "$lang - $res" }
