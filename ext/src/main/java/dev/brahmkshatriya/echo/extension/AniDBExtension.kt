@@ -394,7 +394,7 @@ class AniDBExtension :
                     "Episode $label$fillerTag"
                 }
 
-                val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder()
+                val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toProxiedImageHolder()
                     ?: album.cover
 
                 val epDescription = aniZipEp?.overview ?: aniZipEp?.summary
@@ -512,7 +512,7 @@ class AniDBExtension :
             track.title
         }
 
-        val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toImageHolder() ?: track.cover
+        val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toProxiedImageHolder() ?: track.cover
         val epDescription = aniZipEp?.overview ?: aniZipEp?.summary ?: track.description
         val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L } ?: aniZipEp?.length?.let { it * 60 * 1000L } ?: track.duration
         val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate() ?: track.releaseDate
@@ -864,7 +864,7 @@ class AniDBExtension :
             if (id.isNotEmpty() && id !in animeMap) {
                 val title = a.attr("title").takeIf { it.isNotEmpty() } ?: a.text()
                 val coverUrl = a.selectFirst("img")?.absUrl("src")
-                val cover = coverUrl?.toImageHolder()
+                val cover = coverUrl?.toProxiedImageHolder()
                 animeMap[id] = Album(
                     id = id,
                     title = title,
@@ -883,7 +883,7 @@ class AniDBExtension :
                 val title = card.selectFirst("p.text-xs, .card-overlay p")?.text()
                     ?: card.attr("title")
                 val coverUrl = card.selectFirst("img")?.absUrl("src")
-                val cover = coverUrl?.toImageHolder()
+                val cover = coverUrl?.toProxiedImageHolder()
                 animeMap[id] = Album(
                     id = id,
                     title = title,
@@ -910,7 +910,7 @@ class AniDBExtension :
 
         val title = document.selectFirst("h1")?.text() ?: baseAlbum?.title ?: "Unknown Anime"
         val thumbnailUrl = document.selectFirst("img[src*=poster]")?.attr("abs:src")
-        val cover = thumbnailUrl?.toImageHolder() ?: baseAlbum?.cover
+        val cover = thumbnailUrl?.toProxiedImageHolder() ?: baseAlbum?.cover
 
         val altTitles = mutableListOf<String>()
         document.selectFirst("p.text-sm.text-muted.mb-3")?.text()?.takeIf { it.isNotEmpty() }?.let { altTitles.add(it) }
@@ -1070,7 +1070,7 @@ class AniDBExtension :
                         ?: detectRelationFromTitle(rawTitle)
 
                     val coverUrl = a.selectFirst("img")?.absUrl("src")
-                    val cover = coverUrl?.toImageHolder()
+                    val cover = coverUrl?.toProxiedImageHolder()
 
                     list.add(
                         Album(
@@ -1101,7 +1101,7 @@ class AniDBExtension :
                         ?: detectRelationFromTitle(rawTitle)
 
                     val coverUrl = card.selectFirst("img")?.absUrl("src")
-                    val cover = coverUrl?.toImageHolder()
+                    val cover = coverUrl?.toProxiedImageHolder()
                     list.add(
                         Album(
                             id = href,
@@ -1115,6 +1115,19 @@ class AniDBExtension :
             }
         }
         return list.distinctBy { it.id }
+    }
+
+    private fun String?.toWsrvUrl(): String? {
+        if (this.isNullOrBlank()) return null
+        if (this.startsWith("https://wsrv.nl/?url=") || this.startsWith("http://wsrv.nl/?url=")) return this
+        val fullUrl = if (this.startsWith("//")) "https:$this"
+        else if (this.startsWith("/")) "$baseUrl$this"
+        else this
+        return "https://wsrv.nl/?url=$fullUrl"
+    }
+
+    private fun String?.toProxiedImageHolder(): ImageHolder? {
+        return this.toWsrvUrl()?.toImageHolder()
     }
 
     private fun detectRelationFromTitle(title: String): String {
