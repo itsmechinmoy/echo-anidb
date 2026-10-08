@@ -1,113 +1,88 @@
 package dev.brahmkshatriya.echo.extension
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
+import kotlin.math.roundToInt
 
 @Serializable
-data class EpisodeResponseDto(
-    val episodes: List<EpisodeDto> = emptyList(),
+data class HomeDto(
+    val sections: List<SectionDto> = emptyList(),
+)
+
+@Serializable
+data class SectionDto(
+    val name: String,
+    val posts: List<PostItemDto> = emptyList(),
+)
+
+@Serializable
+data class PostListDto(
+    val posts: List<PostItemDto> = emptyList(),
+)
+
+@Serializable
+data class PostItemDto(
+    val id: Long,
+)
+
+@Serializable
+data class PostDto(
+    val id: Long,
+    val title: String = "Unknown",
+    val type: String? = null,
+    val poster: String? = null,
+    val overview: String? = null,
+    val status: String? = null,
+    val runtime: String? = null,
+    val premiered: String? = null,
+    val age: String? = null,
+    val score: String? = null,
+    val genres: String? = null,
+) {
+    fun buildDescription(): String = buildString {
+        score?.toFloatOrNull()?.let {
+            val filled = (it / 2.0).roundToInt().coerceIn(0, 5)
+            append("★".repeat(filled) + "☆".repeat(5 - filled) + " $it\n\n")
+        }
+        overview?.let { append(it) }
+
+        val meta = listOfNotNull(
+            type?.let { "**Type:** $it" },
+            status?.let { "**Status:** $it" },
+            premiered?.let { "**Season:** $it" },
+            runtime?.let { "**Duration:** $it" },
+            age?.let { "**Rating:** $it" },
+        ).joinToString(" | ")
+        if (meta.isNotEmpty()) append("\n\n$meta")
+        genres?.takeIf { it.isNotBlank() }?.let { append("\n\n**Genres:** $it") }
+    }.trim()
+}
+
+@Serializable
+data class EpisodeListDto(
+    val list: List<EpisodeDto> = emptyList(),
 )
 
 @Serializable
 data class EpisodeDto(
-    val id: Long,
-    val number: Double,
-    val number2: Double? = null,
+    val id: String,
+    val number: String,
     val filler: Boolean = false,
 ) {
-    fun getEpisodeLabel(offset: Float): String {
-        val num = number.toFloat()
-        val num2 = number2?.toFloat()
-        val adjustedNumber = num - offset
-        val adjustedNumber2 = num2?.let { it - offset }
-
-        return if (adjustedNumber2 != null && adjustedNumber2 != 0f && adjustedNumber2 != adjustedNumber) {
-            "${adjustedNumber.toString().removeSuffix(".0")}\u2013${adjustedNumber2.toString().removeSuffix(".0")}"
-        } else {
-            adjustedNumber.toString().removeSuffix(".0")
-        }
-    }
-
-    fun getFormattedTitle(offset: Float, showFillerTag: Boolean = true): String {
-        val label = getEpisodeLabel(offset)
-        var name = "Episode $label"
-        if (filler && showFillerTag) name += " (Filler)"
-        return name
-    }
-
-    fun getAdjustedNumber(offset: Float): Float {
-        return number.toFloat() - offset
-    }
+    fun adjustedNumber(offset: Float): Float = (number.toFloatOrNull() ?: 0f) - offset
 }
 
 @Serializable
-data class LanguageResponseDto(
-    val languages: List<LanguageDto> = emptyList(),
+data class ServerListDto(
+    val list: List<ServerDto> = emptyList(),
 )
 
 @Serializable
-data class LanguageDto(
-    val name: String,
-    val code: String? = null,
-    @SerialName("embed_url") val embedUrl: String,
+data class ServerDto(
+    // "<episodeId>/<language code>"
+    val id: String,
 )
 
 @Serializable
-data class AniZipResponseDto(
-    val titles: Map<String, String?> = emptyMap(),
-    val episodes: Map<String, AniZipEpisodeDto> = emptyMap(),
-    val images: List<AniZipImageDto> = emptyList(),
-    val mappings: Map<String, JsonElement?> = emptyMap(),
-)
-
-@Serializable
-data class AniZipEpisodeDto(
-    @SerialName("tvdbId") val tvdbId: Long? = null,
-    val title: Map<String, String?> = emptyMap(),
-    @SerialName("airDate") val airDate: String? = null,
-    val airdate: String? = null,
-    val runtime: Long? = null,
-    val length: Long? = null,
-    val overview: String? = null,
-    val summary: String? = null,
-    val image: String? = null,
-    val rating: String? = null,
-    val episode: String? = null,
-    @SerialName("episodeNumber") val episodeNumber: Long? = null,
-    @SerialName("seasonNumber") val seasonNumber: Long? = null,
-) {
-    fun getEnglishOrRomajiTitle(): String? {
-        return title["en"]?.takeIf { it.isNotBlank() }
-            ?: title["x-jat"]?.takeIf { it.isNotBlank() }
-            ?: title["ja"]?.takeIf { it.isNotBlank() }
-    }
-}
-
-@Serializable
-data class AniZipImageDto(
-    val coverType: String? = null,
-    val url: String? = null,
-)
-
-@Serializable
-data class AniSkipResponseDto(
-    val found: Boolean = false,
-    val results: List<AniSkipResultDto> = emptyList(),
-    val message: String? = null,
-    val statusCode: Int? = null,
-)
-
-@Serializable
-data class AniSkipResultDto(
-    val interval: AniSkipIntervalDto,
-    val skipType: String,
-    val skipId: String? = null,
-    val episodeLength: Double? = null,
-)
-
-@Serializable
-data class AniSkipIntervalDto(
-    val startTime: Double,
-    val endTime: Double,
+data class IframeDto(
+    val link: String,
 )
