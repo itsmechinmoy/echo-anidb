@@ -3,25 +3,16 @@ package dev.brahmkshatriya.echo.extension
 import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
-import dev.brahmkshatriya.echo.common.clients.LyricsClient
 import dev.brahmkshatriya.echo.common.clients.QuickSearchClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
-import dev.brahmkshatriya.echo.common.clients.ShareClient
-import dev.brahmkshatriya.echo.common.clients.TrackChapterClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Album
-import dev.brahmkshatriya.echo.common.models.Artist
-import dev.brahmkshatriya.echo.common.models.Chapter
-import dev.brahmkshatriya.echo.common.models.Date
-import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
-import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
-import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.QuickSearchItem
 import dev.brahmkshatriya.echo.common.models.Shelf
@@ -32,34 +23,29 @@ import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import java.util.concurrent.TimeUnit
-import kotlin.math.roundToInt
 
 class MemoryCache<K : Any, V : Any>(
     private val ttlMillis: Long = 5 * 60 * 1000L,
-    private val maxEntries: Int = 100
+    private val maxEntries: Int = 100,
 ) {
     private data class Entry<V>(val value: V, val timestamp: Long)
+
     private val map = object : LinkedHashMap<K, Entry<V>>(maxEntries, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, Entry<V>>?): Boolean {
-            return size > maxEntries
-        }
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, Entry<V>>?): Boolean =
+            size > maxEntries
     }
 
     @Synchronized
@@ -76,11 +62,6 @@ class MemoryCache<K : Any, V : Any>(
     fun put(key: K, value: V) {
         map[key] = Entry(value, System.currentTimeMillis())
     }
-
-    @Synchronized
-    fun clear() {
-        map.clear()
-    }
 }
 
 class AniDBExtension :
@@ -89,43 +70,34 @@ class AniDBExtension :
     SearchFeedClient,
     QuickSearchClient,
     AlbumClient,
-    TrackClient,
-    TrackChapterClient,
-    LyricsClient,
-    ShareClient {
+    TrackClient {
 
-    val baseUrl = "https://anidb.app"
+    // The API host used by the working yuzono extension. The old anidb.app HTML site is no longer scraped.
+    private val baseUrl = "https://anilab2.amdapi.click"
 
     private val json = Json {
         ignoreUnknownKeys = true
-        isLenient = true
+        isLenient = true // lets numeric JSON values decode into String fields
         coerceInputValues = true
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .dns(object : okhttp3.Dns {
-            override fun lookup(hostname: String): List<java.net.InetAddress> {
-                val addresses = okhttp3.Dns.SYSTEM.lookup(hostname)
-                return addresses.sortedBy { if (it is java.net.Inet4Address) 0 else 1 }
-            }
+            override fun lookup(hostname: String): List<java.net.InetAddress> =
+                okhttp3.Dns.SYSTEM.lookup(hostname).sortedBy { if (it is java.net.Inet4Address) 0 else 1 }
         })
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
-        .connectionPool(okhttp3.ConnectionPool(20, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
-    private val browseCache = MemoryCache<String, Pair<List<Album>, Boolean>>(ttlMillis = 3 * 60 * 1000L, maxEntries = 50)
-    private val animeDetailsCache = MemoryCache<String, Album>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
-    private val episodesCache = MemoryCache<String, List<EpisodeDto>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
-    private val streamSourcesCache = MemoryCache<String, List<Streamable.Source>>(ttlMillis = 10 * 60 * 1000L, maxEntries = 100)
-    private val aniZipCache = MemoryCache<String, AniZipResponseDto>(ttlMillis = 30 * 60 * 1000L, maxEntries = 100)
-    private val chaptersCache = MemoryCache<String, List<Chapter>>(ttlMillis = 30 * 60 * 1000L, maxEntries = 100)
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val postCache = MemoryCache<Long, PostDto>(ttlMillis = 15 * 60 * 1000L, maxEntries = 400)
+    private val homeCache = MemoryCache<String, HomeDto>(ttlMillis = 5 * 60 * 1000L, maxEntries = 1)
+    private val fetchPermits = Semaphore(8)
 
     private var setting: Settings? = null
 
@@ -133,1108 +105,326 @@ class AniDBExtension :
         this.setting = settings
     }
 
-    override suspend fun onInitialize() {
-        // Initialization if needed
-    }
+    override suspend fun onInitialize() {}
 
     // ============================== Settings ==============================
 
-    override suspend fun getSettingItems(): List<Setting> {
-        return mutableListOf(
-            SettingList(
-                key = PREF_QUALITY_KEY,
-                title = PREF_QUALITY_TITLE,
-                summary = "Preferred video playback quality",
-                entryTitles = mutableListOf("1080p", "720p", "360p", "Auto"),
-                entryValues = mutableListOf("1080p", "720p", "360p", "Auto"),
-                defaultEntryIndex = 0,
-            ),
-            SettingList(
-                key = PREF_LANG_KEY,
-                title = PREF_LANG_TITLE,
-                summary = "Preferred audio language (Dub/Sub)",
-                entryTitles = mutableListOf("Japanese", "English"),
-                entryValues = mutableListOf("jpn", "eng"),
-                defaultEntryIndex = 0,
-            ),
-            SettingSwitch(
-                key = PREF_FILLER_TAG_KEY,
-                title = PREF_FILLER_TAG_TITLE,
-                summary = "Adds '(Filler)' to episode names when available.",
-                defaultValue = PREF_FILLER_TAG_DEFAULT,
-            ),
-            SettingSwitch(
-                key = PREF_FILLER_HIDE_KEY,
-                title = PREF_FILLER_HIDE_TITLE,
-                summary = "Hides detected filler episodes from episode list.",
-                defaultValue = PREF_FILLER_HIDE_DEFAULT,
-            ),
-            SettingSwitch(
-                key = PREF_AUTOSKIP_KEY,
-                title = PREF_AUTOSKIP_TITLE,
-                summary = "Automatically skip Opening and Ending segments without asking.",
-                defaultValue = PREF_AUTOSKIP_DEFAULT,
-            ),
-        )
-    }
+    override suspend fun getSettingItems(): List<Setting> = mutableListOf(
+        SettingList(
+            key = PREF_QUALITY_KEY,
+            title = "Preferred Quality",
+            summary = "Preferred video playback quality",
+            entryTitles = mutableListOf("1080p", "720p", "360p", "Auto"),
+            entryValues = mutableListOf("1080p", "720p", "360p", "Auto"),
+            defaultEntryIndex = 0,
+        ),
+        SettingList(
+            key = PREF_LANG_KEY,
+            title = "Preferred Language",
+            summary = "Preferred audio language, used to order servers",
+            entryTitles = LANGUAGES.values.toMutableList(),
+            entryValues = LANGUAGES.keys.toMutableList(),
+            defaultEntryIndex = 0, // jpn
+        ),
+        SettingSwitch(
+            key = PREF_FILLER_TAG_KEY,
+            title = "Filler Detection",
+            summary = "Adds '(Filler)' to episode names when available.",
+            defaultValue = true,
+        ),
+        SettingSwitch(
+            key = PREF_FILLER_HIDE_KEY,
+            title = "Hide Filler Episodes",
+            summary = "Hides detected filler episodes from the episode list.",
+            defaultValue = false,
+        ),
+    )
 
     // ============================== Home Feed =============================
 
     override suspend fun loadHomeFeed(): Feed<Shelf> {
-        val tabs = mutableListOf(
-            Tab("order_top_airing", "Top Airing", false),
-            Tab("order_trending", "Trending", false),
-            Tab("order_updated", "Latest Updates", false),
-            Tab("order_popular", "Most Popular", false),
-            Tab("order_top", "Top Rated", false),
-        )
+        val sections = getHome().sections.filter { it.posts.isNotEmpty() }
+        val tabs = sections.map { Tab(it.name, it.name, false) } +
+            Tab(LATEST_TAB, "Latest Updates", false)
 
         return Feed(tabs) { tab ->
-            val pagedData = PagedData.Continuous<Shelf> { continuation ->
-                val page = continuation?.toIntOrNull() ?: 1
-                val sort = tab?.id ?: "order_top_airing"
-                val url = "$baseUrl/browse?sort=$sort&page=$page"
-                val (albums, hasNext) = loadBrowsePage(url)
-                val shelves = albums.map { it.toShelf() }
-                Page(shelves, if (hasNext) (page + 1).toString() else null)
+            val id = tab?.id ?: tabs.first().id
+            if (id == LATEST_TAB) {
+                postsPaged { page -> "$baseUrl/api/latest?page=$page" }.toFeedData()
+            } else {
+                PagedData.Single<Shelf> {
+                    sectionAlbums(id).map { it.toShelf() }
+                }.toFeedData()
             }
-            pagedData.toFeedData()
         }
     }
 
     // ============================== Search Feed ===========================
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
-        if (query.startsWith("http://") || query.startsWith("https://")) {
-            val url = query.toHttpUrlOrNull()
-            if (url != null && (url.host == "anidb.app" || url.host == "anidb.net") && url.pathSegments.contains("anime")) {
-                val album = fetchAnimeDetails(query)
-                return mutableListOf<Shelf>(album.toShelf()).toFeed()
-            }
+        val url = query.toHttpUrlOrNull()
+        if (url != null && url.host == LEGACY_HOST && url.pathSegments.firstOrNull() == "anime") {
+            val album = fetchPost(url.encodedPath.toPostId()).toAlbum()
+            return mutableListOf<Shelf>(album.toShelf()).toFeed()
         }
 
-        val pagedData = PagedData.Continuous<Shelf> { continuation ->
-            val page = continuation?.toIntOrNull() ?: 1
-            val urlBuilder = "$baseUrl/browse".toHttpUrl().newBuilder()
-
-            if (query.isNotBlank()) {
-                urlBuilder.addQueryParameter("q", query)
-            } else {
-                urlBuilder.addQueryParameter("sort", "order_top_airing")
-            }
-            urlBuilder.addQueryParameter("page", page.toString())
-
-            val (albums, hasNext) = loadBrowsePage(urlBuilder.build().toString())
-            val shelves = albums.map { it.toShelf() }
-            Page(shelves, if (hasNext) (page + 1).toString() else null)
+        if (query.isBlank()) {
+            return postsPaged { page -> "$baseUrl/api/latest?page=$page" }.toFeed()
         }
 
-        return pagedData.toFeed()
+        return postsPaged { page ->
+            "$baseUrl/api/search".toHttpUrl().newBuilder()
+                .addQueryParameter("query", query)
+                .addQueryParameter("page", page.toString())
+                .build()
+                .toString()
+        }.toFeed()
     }
 
     // ============================ Quick Search ============================
 
     override suspend fun quickSearch(query: String): List<QuickSearchItem> {
         if (query.isBlank()) return emptyList()
-        val urlBuilder = "$baseUrl/browse".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
+        val url = "$baseUrl/api/search".toHttpUrl().newBuilder()
+            .addQueryParameter("query", query)
             .addQueryParameter("page", "1")
-        val (albums, _) = loadBrowsePage(urlBuilder.build().toString())
+            .build()
+            .toString()
+        val (albums, _) = loadPostsPage(url)
         return albums.take(8).map { QuickSearchItem.Media(it, false) }
     }
 
-    override suspend fun deleteQuickSearch(item: QuickSearchItem) {
-        // No-op
-    }
+    override suspend fun deleteQuickSearch(item: QuickSearchItem) {}
 
     // ============================== Album Client ==========================
 
-    override suspend fun loadAlbum(album: Album): Album {
-        val path = if (album.id.startsWith("http")) {
-            album.id
-        } else if (album.id.startsWith("/")) {
-            "$baseUrl${album.id}"
-        } else {
-            "$baseUrl/anime/${album.id}"
-        }
-        return fetchAnimeDetails(path, album)
-    }
-
-    private fun getAniZipMeta(album: Album, animeId: String): AniZipResponseDto? {
-        val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
-            album
-        } else {
-            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId")
-        }
-
-        val anilistId = resolvedAlbum?.extras?.get("anilist_id")
-        val anidbId = resolvedAlbum?.extras?.get("anidb_id")
-        val malId = resolvedAlbum?.extras?.get("mal_id")
-        val kitsuId = resolvedAlbum?.extras?.get("kitsu_id")
-
-        val param = when {
-            anilistId != null -> "anilist_id=$anilistId"
-            anidbId != null -> "anidb_id=$anidbId"
-            malId != null -> "mal_id=$malId"
-            kitsuId != null -> "kitsu_id=$kitsuId"
-            else -> null
-        } ?: return null
-
-        return aniZipCache.get(param)
-    }
-
-    private fun prefetchAniZipMeta(album: Album, animeId: String) {
-        scope.launch {
-            try {
-                val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
-                    album
-                } else {
-                    animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId") ?: run {
-                        val fullUrl = if (album.id.startsWith("http")) album.id else "$baseUrl/anime/$animeId"
-                        fetchAnimeDetails(fullUrl, album)
-                    }
-                }
-
-                val anilistId = resolvedAlbum.extras["anilist_id"]
-                val anidbId = resolvedAlbum.extras["anidb_id"]
-                val malId = resolvedAlbum.extras["mal_id"]
-                val kitsuId = resolvedAlbum.extras["kitsu_id"]
-
-                val param = when {
-                    anilistId != null -> "anilist_id=$anilistId"
-                    anidbId != null -> "anidb_id=$anidbId"
-                    malId != null -> "mal_id=$malId"
-                    kitsuId != null -> "kitsu_id=$kitsuId"
-                    else -> null
-                } ?: return@launch
-
-                if (aniZipCache.get(param) == null) {
-                    val url = "https://api.ani.zip/mappings?$param"
-                    val jsonStr = httpGet(url, isApi = true)
-                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
-                    aniZipCache.put(param, parsed)
-                }
-            } catch (e: Exception) {
-                // Background prefetch error ignored
-            }
-        }
-    }
+    override suspend fun loadAlbum(album: Album): Album =
+        fetchPost(album.id.toPostId()).toAlbum()
 
     override suspend fun loadTracks(album: Album): Feed<Track> = PagedData.Single<Track> {
-        val path = album.id
-        val lastSegment = (if (path.startsWith("http")) path else "$baseUrl$path").toHttpUrl().pathSegments.lastOrNull() ?: path
-        val animeId = ANIME_ID_REGEX.find(lastSegment)?.groupValues?.get(1) ?: lastSegment
+        val postId = album.id.toPostId()
+        val episodes = json.decodeFromString<EpisodeListDto>(
+            httpGet("$PLAY_URL/api/anime/$postId/episodes"),
+        ).list
 
-        val episodesArr = episodesCache.get(animeId) ?: run {
-            val episodesJson = httpGet("$baseUrl/api/frontend/anime/$animeId/episodes", isApi = true)
-            val parsed = json.decodeFromString<EpisodeResponseDto>(episodesJson).episodes
-            episodesCache.put(animeId, parsed)
-            parsed
-        }
+        val minEp = episodes.mapNotNull { it.number.toFloatOrNull() }.minOrNull() ?: 0f
+        val offset = if (minEp > 1f) minEp - 1f else 0f
 
-        // Fast AniZip resolution: already cached from fetchAnimeDetails or fetched within 800ms
-        val resolvedAlbum = if (album.extras["anilist_id"] != null || album.extras["anidb_id"] != null || album.extras["mal_id"] != null || album.extras["kitsu_id"] != null) {
-            album
-        } else {
-            animeDetailsCache.get(album.id) ?: animeDetailsCache.get("$baseUrl/anime/$animeId")
-        }
+        val hideFiller = setting?.getBoolean(PREF_FILLER_HIDE_KEY) ?: false
+        val showFillerTag = setting?.getBoolean(PREF_FILLER_TAG_KEY) ?: true
 
-        val anilistId = resolvedAlbum?.extras?.get("anilist_id") ?: album.extras["anilist_id"]
-        val anidbId = resolvedAlbum?.extras?.get("anidb_id") ?: album.extras["anidb_id"]
-        val malId = resolvedAlbum?.extras?.get("mal_id") ?: album.extras["mal_id"]
-        val kitsuId = resolvedAlbum?.extras?.get("kitsu_id") ?: album.extras["kitsu_id"]
-
-        val param = when {
-            anilistId != null -> "anilist_id=$anilistId"
-            anidbId != null -> "anidb_id=$anidbId"
-            malId != null -> "mal_id=$malId"
-            kitsuId != null -> "kitsu_id=$kitsuId"
-            else -> null
-        }
-
-        val aniZipMeta = if (param != null) {
-            aniZipCache.get(param) ?: try {
-                withTimeoutOrNull(800L) {
-                    val url = "https://api.ani.zip/mappings?$param"
-                    val jsonStr = httpGet(url, isApi = true)
-                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
-                    aniZipCache.put(param, parsed)
-                    parsed
-                }
-            } catch (e: Exception) {
-                null
-            }
-        } else {
-            prefetchAniZipMeta(album, animeId)
-            null
-        }
-
-        val minEpNumber = episodesArr.minOfOrNull { it.number.toFloat() } ?: 0f
-        val offset = if (minEpNumber > 1f) minEpNumber - 1f else 0f
-
-        val hideFiller = setting?.getBoolean(PREF_FILLER_HIDE_KEY) ?: PREF_FILLER_HIDE_DEFAULT
-        val showFillerTag = setting?.getBoolean(PREF_FILLER_TAG_KEY) ?: PREF_FILLER_TAG_DEFAULT
-
-        episodesArr
+        episodes
             .filter { !hideFiller || !it.filler }
+            .sortedBy { it.adjustedNumber(offset) }
             .map { ep ->
-                val epNumber = ep.getAdjustedNumber(offset)
-                val epNumberInt = epNumber.toInt()
-                val epNumberStr = if (epNumber == epNumberInt.toFloat()) epNumberInt.toString() else epNumber.toString()
-
-                val aniZipEp = aniZipMeta?.episodes?.get(epNumberStr)
-                    ?: aniZipMeta?.episodes?.get(ep.number.toInt().toString())
-
-                val aniZipTitle = aniZipEp?.getEnglishOrRomajiTitle()
-                val label = ep.getEpisodeLabel(offset)
-                val fillerTag = if (ep.filler && showFillerTag) " (Filler)" else ""
-                val epTitle = if (!aniZipTitle.isNullOrBlank()) {
-                    "$label: $aniZipTitle$fillerTag"
-                } else {
-                    "Episode $label$fillerTag"
-                }
-
-                val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toProxiedImageHolder()
-                    ?: album.cover
-
-                val epDescription = aniZipEp?.overview ?: aniZipEp?.summary
-                val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L }
-                    ?: aniZipEp?.length?.let { it * 60 * 1000L }
-                val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate()
-
-                val epId = ep.id.toString()
+                val num = ep.adjustedNumber(offset)
+                val label = num.toString().removeSuffix(".0")
+                val title = "Episode $label" + if (ep.filler && showFillerTag) " (Filler)" else ""
                 Track(
-                    id = epId,
-                    title = epTitle,
+                    id = ep.id,
+                    title = title,
                     type = Track.Type.Video,
-                    cover = epCover,
+                    cover = album.cover,
                     album = album,
                     artists = album.artists,
-                    duration = epDuration,
-                    releaseDate = epReleaseDate,
-                    description = epDescription,
                     streamables = mutableListOf(
-                        Streamable(
-                            id = epId,
-                            title = "AniDB Stream",
+                        Streamable.server(
+                            id = ep.id,
                             quality = 1080,
-                            type = Streamable.MediaType.Server,
-                            extras = mapOf("episodeId" to epId),
-                        )
+                            title = "AniDB",
+                            extras = mapOf("episodeId" to ep.id),
+                        ),
                     ),
                     extras = mapOf(
-                        "animeId" to animeId,
-                        "episodeId" to epId,
-                        "number" to epNumber.toString(),
+                        "postId" to postId.toString(),
+                        "episodeId" to ep.id,
+                        "number" to num.toString(),
                     ),
                 )
             }
     }.toFeed()
 
-    override suspend fun loadFeed(album: Album): Feed<Shelf>? {
-        val path = if (album.id.startsWith("http")) {
-            album.id
-        } else if (album.id.startsWith("/")) {
-            "$baseUrl${album.id}"
-        } else {
-            "$baseUrl/anime/${album.id}"
-        }
-
-        val html = httpGet(path)
-        val document = Jsoup.parse(html, baseUrl)
-        val shelves = mutableListOf<Shelf>()
-
-        val seasons = parseSeasons(document, path)
-        if (seasons.isNotEmpty()) {
-            shelves.add(
-                Shelf.Lists.Items(
-                    id = "seasons",
-                    title = "Seasons",
-                    list = seasons,
-                )
-            )
-        }
-
-        val relatedAlbums = parseRelatedAnime(document, path)
-        if (relatedAlbums.isNotEmpty()) {
-            shelves.add(
-                Shelf.Lists.Items(
-                    id = "related",
-                    title = "Related & Recommendations",
-                    list = relatedAlbums,
-                )
-            )
-        }
-
-        return if (shelves.isEmpty()) null else shelves.toFeed()
-    }
+    override suspend fun loadFeed(album: Album): Feed<Shelf>? = null
 
     // ============================== Track Client ==========================
 
+    // One server per language: ids look like "<episodeId>/<lang>" and each is listed twice.
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
-        val epId = track.extras["episodeId"] ?: track.id
-        val animeId = track.extras["animeId"] ?: ""
-        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString() ?: ""
+        val episodeId = track.extras["episodeId"] ?: track.id
+        val langPref = setting?.getString(PREF_LANG_KEY) ?: PREF_LANG_DEFAULT
 
-        val aniZipMeta = if (animeId.isNotEmpty()) {
-            track.album?.let { getAniZipMeta(it, animeId) } ?: try {
-                val anilistId = track.album?.extras?.get("anilist_id")
-                val anidbId = track.album?.extras?.get("anidb_id")
-                val malId = track.album?.extras?.get("mal_id")
-                val kitsuId = track.album?.extras?.get("kitsu_id")
-                val param = when {
-                    anilistId != null -> "anilist_id=$anilistId"
-                    anidbId != null -> "anidb_id=$anidbId"
-                    malId != null -> "mal_id=$malId"
-                    kitsuId != null -> "kitsu_id=$kitsuId"
-                    else -> null
-                }
-                if (param != null) {
-                    aniZipCache.get(param) ?: withTimeoutOrNull(3000L) {
-                        val url = "https://api.ani.zip/mappings?$param"
-                        val jsonStr = httpGet(url, isApi = true)
-                        val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
-                        aniZipCache.put(param, parsed)
-                        parsed
-                    }
-                } else null
-            } catch (e: Exception) {
-                null
-            }
-        } else null
+        val servers = json.decodeFromString<ServerListDto>(
+            httpGet("$PLAY_URL/api/episode/$episodeId/servers"),
+        ).list.distinctBy { it.id }
 
-        val aniZipEp = aniZipMeta?.episodes?.get(epNumberStr)
-        val aniZipTitle = aniZipEp?.getEnglishOrRomajiTitle()
-        val epTitle = if (!aniZipTitle.isNullOrBlank()) {
-            val numLabel = track.extras["number"]?.removeSuffix(".0") ?: ""
-            if (numLabel.isNotEmpty()) "$numLabel: $aniZipTitle" else aniZipTitle
-        } else {
-            track.title
-        }
-
-        val epCover = aniZipEp?.image?.takeIf { it.isNotBlank() }?.toProxiedImageHolder() ?: track.cover
-        val epDescription = aniZipEp?.overview ?: aniZipEp?.summary ?: track.description
-        val epDuration = aniZipEp?.runtime?.let { it * 60 * 1000L } ?: aniZipEp?.length?.let { it * 60 * 1000L } ?: track.duration
-        val epReleaseDate = (aniZipEp?.airDate ?: aniZipEp?.airdate)?.toEchoDate() ?: track.releaseDate
-
-        val streamables = mutableListOf<Streamable>()
-
-        try {
-            val languagesJson = httpGet("$baseUrl/api/frontend/episode/$epId/languages", isApi = true)
-            val languages = json.decodeFromString<LanguageResponseDto>(languagesJson).languages
-
-            languages.forEachIndexed { index, lang ->
-                val isJapanese = lang.name.contains("Japanese", ignoreCase = true) || lang.code == "jpn"
-                val quality = if (isJapanese) 1080 else 1000 - index
-                streamables.add(
-                    Streamable.server(
-                        id = "server_${epId}_${lang.code ?: lang.name}",
-                        quality = quality,
-                        title = "${lang.name} (Audio)",
-                        extras = mapOf(
-                            "episodeId" to epId,
-                            "embedUrl" to lang.embedUrl,
-                            "langName" to lang.name,
-                            "animeId" to (animeId ?: "")
-                        )
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            // Ignore and use default fallback
-        }
-
-        if (streamables.isEmpty()) {
-            streamables.add(
-                Streamable.server(
-                    id = epId,
-                    quality = 1080,
-                    title = "AniDB Stream",
-                    extras = mapOf("episodeId" to epId, "animeId" to (animeId ?: ""))
-                )
+        val streamables = servers.mapIndexed { index, server ->
+            val lang = server.id.substringAfterLast('/')
+            Streamable.server(
+                id = server.id,
+                // Echo plays the highest quality server first, so rank the preferred language on top
+                quality = if (lang == langPref) 2000 else 1000 - index,
+                title = LANGUAGES[lang] ?: lang.uppercase(),
+                extras = mapOf(
+                    "episodeId" to episodeId,
+                    "serverId" to server.id,
+                ),
             )
         }
 
-        return track.copy(
-            title = epTitle,
-            cover = epCover,
-            description = epDescription,
-            duration = epDuration,
-            releaseDate = epReleaseDate,
-            streamables = streamables,
-        )
+        if (streamables.isEmpty()) throw Exception("No servers available for this episode.")
+        return track.copy(streamables = streamables)
     }
 
     override suspend fun loadStreamableMedia(
         streamable: Streamable,
         isDownload: Boolean,
     ): Streamable.Media {
-        val episodeId = streamable.extras["episodeId"] ?: streamable.id.removePrefix("server_").substringBefore("_")
-        val specificEmbedUrl = streamable.extras["embedUrl"]
-        val specificLangName = streamable.extras["langName"]
+        val serverId = streamable.extras["serverId"] ?: streamable.id
 
-        // If a specific language server was selected
-        if (!specificEmbedUrl.isNullOrBlank() && !specificLangName.isNullOrBlank()) {
-            val cacheKey = "${episodeId}_${specificLangName}"
-            val cached = streamSourcesCache.get(cacheKey)
-            if (!cached.isNullOrEmpty()) {
-                return Streamable.Media.Server(sources = cached, merged = false)
-            }
+        val link = json.decodeFromString<IframeDto>(
+            httpGet("$PLAY_URL/api/episode/$serverId/iframe", playHeaders),
+        ).link
 
-            val embedHtml = httpGet(specificEmbedUrl)
-            val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
-                ?: DIRECT_M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
-                ?: throw Exception("Failed to extract stream URL for $specificLangName")
-
-            val sources = extractHlsSources(m3u8Url, specificLangName)
-            val sortedSources = sortSources(sources)
-            streamSourcesCache.put(cacheKey, sortedSources)
-            return Streamable.Media.Server(sources = sortedSources, merged = false)
-        }
-
-        // Otherwise load all languages and combine them
-        val cached = streamSourcesCache.get(episodeId)
-        if (!cached.isNullOrEmpty()) {
-            return Streamable.Media.Server(sources = cached, merged = false)
-        }
-
-        val languagesJson = httpGet("$baseUrl/api/frontend/episode/$episodeId/languages", isApi = true)
-        val languages = json.decodeFromString<LanguageResponseDto>(languagesJson).languages
-
-        val sources = coroutineScope {
-            languages.map { language ->
-                async<List<Streamable.Source>>(Dispatchers.IO) {
-                    try {
-                        val embedHtml = httpGet(language.embedUrl)
-                        val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
-                            ?: DIRECT_M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
-                            ?: return@async emptyList<Streamable.Source>()
-
-                        extractHlsSources(m3u8Url, language.name)
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            }.awaitAll().flatten()
-        }
-
-        val sortedSources = sortSources(sources)
-        if (sortedSources.isEmpty()) {
-            throw Exception("No stream servers available for this episode.")
-        }
-        streamSourcesCache.put(episodeId, sortedSources)
-        return Streamable.Media.Server(sources = sortedSources, merged = false)
-    }
-
-    private suspend fun extractHlsSources(
-        masterUrl: String,
-        languageName: String,
-        referer: String = "$baseUrl/",
-    ): List<Streamable.Source> {
-        val headers = mapOf(
-            "Referer" to referer,
-            "Origin" to "https://${referer.toHttpUrlOrNull()?.host ?: "anidb.app"}",
-            "User-Agent" to USER_AGENT,
-            "Accept" to "*/*"
-        )
-
-        val masterContent = try {
-            httpGet(masterUrl)
-        } catch (e: Exception) {
-            return listOf(
-                Streamable.Source.Http(
-                    request = NetworkRequest(url = masterUrl, headers = headers),
-                    type = if (masterUrl.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
-                    quality = 1080,
-                    title = "$languageName - Auto",
-                    isVideo = true
-                )
-            )
-        }
-
-        if ("#EXT-X-STREAM-INF:" !in masterContent) {
-            return listOf(
-                Streamable.Source.Http(
-                    request = NetworkRequest(url = masterUrl, headers = headers),
-                    type = if (masterUrl.contains(".m3u8")) Streamable.SourceType.HLS else Streamable.SourceType.Progressive,
-                    quality = 1080,
-                    title = "$languageName - Stream",
-                    isVideo = true
-                )
-            )
-        }
-
-        val sources = mutableListOf<Streamable.Source>()
-
-        // Add Master / Adaptive Auto stream
-        sources.add(
-            Streamable.Source.Http(
-                request = NetworkRequest(url = masterUrl, headers = headers),
-                type = Streamable.SourceType.HLS,
-                quality = 1080,
-                title = "$languageName - Auto",
-                isVideo = true
-            )
-        )
-
-        // Parse variant streams from #EXT-X-STREAM-INF:
-        val entries = masterContent.substringAfter("#EXT-X-STREAM-INF:").split("#EXT-X-STREAM-INF:")
-        for (entry in entries) {
-            val lines = entry.trim().lines()
-            val streamInf = lines.firstOrNull() ?: continue
-            val urlLine = lines.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() } ?: continue
-
-            val streamUrl = if (urlLine.startsWith("http://") || urlLine.startsWith("https://")) {
-                urlLine
-            } else {
-                val baseUri = masterUrl.substringBeforeLast("/")
-                "$baseUri/$urlLine"
-            }
-
-            val resMatch = Regex("""RESOLUTION=(\d+)x(\d+)""").find(streamInf)
-            val height = resMatch?.groupValues?.get(2)?.toIntOrNull()
-            val qualityName = if (height != null) "${height}p" else "Variant"
-
-            sources.add(
-                Streamable.Source.Http(
-                    request = NetworkRequest(url = streamUrl, headers = headers),
-                    type = Streamable.SourceType.HLS,
-                    quality = height ?: 1080,
-                    title = "$languageName - $qualityName",
-                    isVideo = true
-                )
-            )
-        }
-
-        return sources.distinctBy { it.id }
+        val headers = mapOf("User-Agent" to USER_AGENT)
+        val sources = buildSources(link, headers)
+        return Streamable.Media.Server(sources = sortSources(sources), merged = false)
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
 
-    // =========================== Chapter Client ===========================
-
-    override suspend fun getChapters(track: Track): List<Chapter> {
-        val animeId = track.extras["animeId"] ?: return emptyList()
-        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString() ?: return emptyList()
-        val cacheKey = "$animeId:$epNumberStr"
-
-        val cached = chaptersCache.get(cacheKey)
-        if (cached != null) return cached
-
-        val autoSkip = setting?.getBoolean(PREF_AUTOSKIP_KEY) ?: PREF_AUTOSKIP_DEFAULT
-
-        val anilistId = track.album?.extras?.get("anilist_id")
-            ?: animeDetailsCache.get(track.album?.id ?: "")?.extras?.get("anilist_id")
-            ?: animeDetailsCache.get("$baseUrl/anime/$animeId")?.extras?.get("anilist_id")
-
-        val malId = track.album?.extras?.get("mal_id")
-            ?: animeDetailsCache.get(track.album?.id ?: "")?.extras?.get("mal_id")
-            ?: animeDetailsCache.get("$baseUrl/anime/$animeId")?.extras?.get("mal_id")
-
-        val targetId = malId ?: anilistId ?: return emptyList()
-
-        val chapters = try {
-            val url = "https://api.aniskip.com/v2/skip-times/$targetId/$epNumberStr?types[]=op&types[]=ed&types[]=mixed-op&types[]=mixed-ed&types[]=recap&episodeLength=0"
-            val jsonStr = httpGet(url, isApi = true)
-            val parsed = json.decodeFromString<AniSkipResponseDto>(jsonStr)
-            if (!parsed.found || parsed.results.isEmpty()) emptyList()
-            else {
-                parsed.results.map { res ->
-                    val name = when (res.skipType.lowercase()) {
-                        "op" -> "Opening"
-                        "ed" -> "Ending"
-                        "mixed-op" -> "Mixed Opening"
-                        "mixed-ed" -> "Mixed Ending"
-                        "recap" -> "Recap"
-                        else -> res.skipType.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.ROOT) else it.toString() }
-                    }
-                    Chapter(
-                        name = name,
-                        startTime = (res.interval.startTime * 1000).toLong(),
-                        endTime = (res.interval.endTime * 1000).toLong(),
-                        skipType = if (autoSkip) Chapter.SkipType.SKIP else Chapter.SkipType.ASK,
-                    )
-                }.sortedBy { it.startTime }
-            }
-        } catch (e: Exception) {
-            emptyList()
-        }
-
-        if (chapters.isNotEmpty()) {
-            chaptersCache.put(cacheKey, chapters)
-        }
-        return chapters
-    }
-
-    // =========================== Lyrics Client ============================
-
-    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
-        val animeId = track.extras["animeId"]
-        val epNumberStr = track.extras["number"]?.toFloatOrNull()?.toInt()?.toString()
-        val list = mutableListOf<Lyrics>()
-
-        // 1. Episode Synopsis & Overview from AniZip / Track Description
-        val desc = track.description?.takeIf { it.isNotBlank() }
-            ?: (track.album?.let { getAniZipMeta(it, animeId ?: "") }?.episodes?.get(epNumberStr)?.overview)
-            ?: (track.album?.description?.takeIf { it.isNotBlank() })
-
-        if (!desc.isNullOrBlank()) {
-            list.add(
-                Lyrics(
-                    id = "synopsis_${track.id}",
-                    title = "Episode Synopsis",
-                    subtitle = track.title,
-                    lyrics = Lyrics.Simple(desc),
-                    extras = mapOf("text" to desc)
-                )
-            )
-        }
-
-        // 2. Timed Chapters & Segment Markers (Opening, Ending, Recap)
-        val chapters = getChapters(track)
-        if (chapters.isNotEmpty()) {
-            val timedItems = chapters.map { ch ->
-                Lyrics.Item(
-                    text = "▶ ${ch.name}",
-                    startTime = ch.startTime,
-                    endTime = ch.endTime ?: (ch.startTime + 90000L)
-                )
-            }
-            list.add(
-                Lyrics(
-                    id = "chapters_${track.id}",
-                    title = "Episode Segments & OP/ED",
-                    subtitle = "AniSkip Markers",
-                    lyrics = Lyrics.Timed(timedItems, fillTimeGaps = true),
-                    extras = mapOf("isChapters" to "true")
-                )
-            )
-        }
-
-        return list.toFeed()
-    }
-
-    override suspend fun loadLyrics(lyrics: Lyrics): Lyrics {
-        if (lyrics.lyrics != null) return lyrics
-        val text = lyrics.extras["text"]
-        if (!text.isNullOrBlank()) {
-            return lyrics.copy(lyrics = Lyrics.Simple(text))
-        }
-        return lyrics
-    }
-
-    // ============================== Share Client ==========================
-
-    override suspend fun onShare(item: EchoMediaItem): String {
-        return when (item) {
-            is Album -> {
-                if (item.id.startsWith("http")) item.id
-                else if (item.id.startsWith("/")) "$baseUrl${item.id}"
-                else "$baseUrl/anime/${item.id}"
-            }
-            is Track -> {
-                val animeId = item.extras["animeId"]
-                if (animeId != null) "$baseUrl/anime/$animeId" else baseUrl
-            }
-            else -> baseUrl
-        }
-    }
-
     // ============================= Utilities ==============================
 
-    private suspend fun loadBrowsePage(url: String): Pair<List<Album>, Boolean> {
-        val cached = browseCache.get(url)
-        if (cached != null) return cached
-
-        val html = httpGet(url)
-        val document = Jsoup.parse(html, baseUrl)
-        val result = parseBrowsePage(document)
-        browseCache.put(url, result)
-        return result
-    }
-
-    private fun parseBrowsePage(document: Document): Pair<List<Album>, Boolean> {
-        val animeMap = linkedMapOf<String, Album>()
-
-        // Priority 1: Seasons carousel / row
-        document.select("div.overflow-x-auto.snap-x a[href*=/anime/]").forEach { a ->
-            val href = a.absUrl("href")
-            val relativeUrl = a.attr("href")
-            val id = if (relativeUrl.isNotEmpty()) relativeUrl else href
-            if (id.isNotEmpty() && id !in animeMap) {
-                val title = a.attr("title").takeIf { it.isNotEmpty() } ?: a.text()
-                val coverUrl = a.selectFirst("img")?.absUrl("src")
-                val cover = coverUrl?.toProxiedImageHolder()
-                animeMap[id] = Album(
-                    id = id,
-                    title = title,
-                    type = Album.Type.Show,
-                    cover = cover,
-                )
-            }
-        }
-
-        // Priority 2: Standard anime grid
-        document.select(".anime-grid a.anime-card").forEach { card ->
-            val href = card.absUrl("href")
-            val relativeUrl = card.attr("href")
-            val id = if (relativeUrl.isNotEmpty()) relativeUrl else href
-            if (id.isNotEmpty() && id !in animeMap) {
-                val title = card.selectFirst("p.text-xs, .card-overlay p")?.text()
-                    ?: card.attr("title")
-                val coverUrl = card.selectFirst("img")?.absUrl("src")
-                val cover = coverUrl?.toProxiedImageHolder()
-                animeMap[id] = Album(
-                    id = id,
-                    title = title,
-                    type = Album.Type.Show,
-                    cover = cover,
-                )
-            }
-        }
-
-        val hasNextPage = document.select("a").any {
-            it.text().contains("Next") && it.attr("href").contains("page=")
-        }
-
-        return Pair(animeMap.values.toList(), hasNextPage)
-    }
-
-    private suspend fun fetchAnimeDetails(url: String, baseAlbum: Album? = null): Album {
-        val cached = animeDetailsCache.get(url)
-        if (cached != null) return cached
-
-        val html = httpGet(url)
-        val document = Jsoup.parse(html, baseUrl)
-        val dl = document.selectFirst("dl.grid")
-
-        val title = document.selectFirst("h1")?.text() ?: baseAlbum?.title ?: "Unknown Anime"
-        val thumbnailUrl = document.selectFirst("img[src*=poster]")?.attr("abs:src")
-        val cover = thumbnailUrl?.toProxiedImageHolder() ?: baseAlbum?.cover
-
-        val altTitles = mutableListOf<String>()
-        document.selectFirst("p.text-sm.text-muted.mb-3")?.text()?.takeIf { it.isNotEmpty() }?.let { altTitles.add(it) }
-        dl?.selectFirst("dt:contains(Synonyms) + dd")?.text()?.takeIf { it.isNotEmpty() }?.let { syns ->
-            syns.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { altTitles.add(it) }
-        }
-
-        val scoreText = dl?.selectFirst("dt:contains(Score) + dd")?.text()
-        val scoreValue = scoreText?.toFloatOrNull()
-        val stars = if (scoreValue != null) {
-            val filled = (scoreValue / 2.0).roundToInt().coerceIn(0, 5)
-            "★".repeat(filled) + "☆".repeat(5 - filled) + " $scoreValue"
-        } else {
-            null
-        }
-
-        val type = dl?.selectFirst("dt:contains(Type) + dd")?.text()
-        val season = dl?.selectFirst("dt:contains(Season) + dd")?.text()
-        val duration = dl?.selectFirst("dt:contains(Duration) + dd")?.text()
-        val rating = dl?.selectFirst("dt:contains(Rating) + dd")?.text()
-        val metaParts = mutableListOf<String>()
-        type?.let { metaParts.add("**Type:** $it") }
-        season?.let { metaParts.add("**Season:** $it") }
-        duration?.let { metaParts.add("**Duration:** $it") }
-        rating?.let { metaParts.add("**Rating:** $it") }
-        val metaLine1 = metaParts.joinToString(" | ")
-
-        val airedRaw = dl?.selectFirst("dt:contains(Aired) + dd")?.text()
-        val metaLine2 = if (airedRaw != null) {
-            val parts = airedRaw.split(Regex("\\s*[–—-]\\s*"))
-            val dateAired = parts.getOrNull(0)?.trim()
-            val dateEnded = parts.getOrNull(1)?.trim()
-            buildString {
-                if (dateAired != null) append("**Date Aired:** $dateAired")
-                if (dateEnded != null) {
-                    if (isNotEmpty()) append("\n")
-                    append("**Date Ended:** $dateEnded")
-                }
-            }
-        } else {
-            ""
-        }
-
-        val trailerUrl = document.selectFirst("a:contains(Trailer)")?.absUrl("href")
-        val synopsis = document.select("h2:contains(Synopsis) + div p")
-            .joinToString("\n\n") { it.text() }
-
-        val allowedDomains = mutableListOf("myanimelist.net", "anilist.co", "anidb.net", "kitsu.app")
-        val links = document.select("div[class*='gap-2'].mb-4 a[target=_blank]")
-            .filter { a ->
-                val href = a.attr("href").lowercase()
-                allowedDomains.any { domain -> href.contains(domain) }
-            }
-            .joinToString(" | ") { a -> "[${a.text()}](${a.absUrl("href")})" }
-
-        val fullDescription = buildString {
-            if (stars != null) {
-                append("$stars\n\n")
-            }
-            if (synopsis.isNotEmpty()) {
-                append(synopsis)
-            }
-            if (metaLine1.isNotEmpty()) {
-                append("\n\n$metaLine1")
-            }
-            if (metaLine2.isNotEmpty()) {
-                append("\n$metaLine2")
-            }
-            if (altTitles.isNotEmpty()) {
-                append("\n\n**Alternative Titles:**\n")
-                altTitles.distinct().forEach { append("- $it\n") }
-            }
-            if (links.isNotEmpty()) {
-                append("\n\n**Links:** $links")
-            }
-            if (!trailerUrl.isNullOrEmpty()) {
-                append("\n\n[Trailer]($trailerUrl)")
-            }
-        }.trim()
-
-        val studioName = dl?.selectFirst("dt:contains(Studios) + dd a, dt:contains(Studio) + dd a")?.text()
-        val artists = mutableListOf<Artist>()
-        studioName?.let { artists.add(Artist(id = it, name = it, cover = null)) }
-
-        val id = baseAlbum?.id ?: (url.toHttpUrlOrNull()?.encodedPath ?: url)
-
-        val extras = mutableMapOf<String, String>()
-        baseAlbum?.extras?.let { extras.putAll(it) }
-
-        document.select("div[class*='gap-2'].mb-4 a[target=_blank], a[href*='anilist.co'], a[href*='myanimelist.net'], a[href*='anidb.net'], a[href*='kitsu.']").forEach { a ->
-            val href = a.attr("href")
-            when {
-                href.contains("anilist.co/anime/") -> {
-                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["anilist_id"] = it }
-                }
-                href.contains("myanimelist.net/anime/") -> {
-                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["mal_id"] = it }
-                }
-                href.contains("anidb.net/anime/") -> {
-                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["anidb_id"] = it }
-                }
-                href.contains("kitsu.app/anime/") || href.contains("kitsu.io/anime/") -> {
-                    Regex("""anime/(\d+)""").find(href)?.groupValues?.get(1)?.let { extras["kitsu_id"] = it }
-                }
-            }
-        }
-
-        val album = Album(
-            id = id,
+    private suspend fun buildSources(
+        masterUrl: String,
+        headers: Map<String, String>,
+    ): List<Streamable.Source> {
+        fun source(url: String, quality: Int, title: String) = Streamable.Source.Http(
+            request = NetworkRequest(url = url, headers = headers),
+            type = Streamable.SourceType.HLS,
+            quality = quality,
             title = title,
-            type = Album.Type.Show,
-            cover = cover,
-            artists = artists,
-            description = fullDescription,
-            extras = extras,
+            isVideo = true,
         )
-        animeDetailsCache.put(url, album)
 
-        val anilistId = extras["anilist_id"]
-        val anidbId = extras["anidb_id"]
-        val malId = extras["mal_id"]
-        val kitsuId = extras["kitsu_id"]
-        val param = when {
-            anilistId != null -> "anilist_id=$anilistId"
-            anidbId != null -> "anidb_id=$anidbId"
-            malId != null -> "mal_id=$malId"
-            kitsuId != null -> "kitsu_id=$kitsuId"
-            else -> null
-        }
-        if (param != null && aniZipCache.get(param) == null) {
-            scope.launch {
-                try {
-                    val jsonStr = httpGet("https://api.ani.zip/mappings?$param", isApi = true)
-                    val parsed = json.decodeFromString<AniZipResponseDto>(jsonStr)
-                    aniZipCache.put(param, parsed)
-                } catch (e: Exception) {
-                    // Ignore
-                }
-            }
+        val content = try {
+            httpGet(masterUrl)
+        } catch (e: Exception) {
+            return listOf(source(masterUrl, 1080, "Auto"))
         }
 
-        return album
-    }
+        if ("#EXT-X-STREAM-INF:" !in content) return listOf(source(masterUrl, 1080, "Auto"))
 
-    private fun parseSeasons(document: Document, currentUrl: String): List<Album> {
-        val list = mutableListOf<Album>()
-        document.select("div.overflow-x-auto.snap-x a[href*=/anime/]").forEach { a ->
-            val href = a.attr("href")
-            if (href.isNotEmpty()) {
-                val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
-                if (fullUrl != currentUrl && href != currentUrl) {
-                    val rawTitle = a.attr("title").takeIf { it.isNotBlank() }
-                        ?: a.selectFirst("p.font-medium, p.text-sm, h3, h4")?.text()
-                        ?: a.text()
-                    val badge = a.selectFirst("span.badge, p.text-xs, p.text-muted, div.text-xs")?.text()?.trim()
-                    val relation = badge?.takeIf { it.isNotBlank() && !rawTitle.equals(it, ignoreCase = true) }
-                        ?: detectRelationFromTitle(rawTitle)
-
-                    val coverUrl = a.selectFirst("img")?.absUrl("src")
-                    val cover = coverUrl?.toProxiedImageHolder()
-
-                    list.add(
-                        Album(
-                            id = href,
-                            title = rawTitle.ifBlank { "Season" },
-                            subtitle = relation,
-                            type = Album.Type.Show,
-                            cover = cover,
-                        )
-                    )
-                }
-            }
-        }
-        return list.distinctBy { it.id }
-    }
-
-    private fun parseRelatedAnime(document: Document, currentUrl: String): List<Album> {
-        val list = mutableListOf<Album>()
-        document.select(".anime-grid a.anime-card").forEach { card ->
-            val href = card.attr("href")
-            if (href.isNotEmpty()) {
-                val fullUrl = if (href.startsWith("http")) href else "$baseUrl$href"
-                if (fullUrl != currentUrl && href != currentUrl) {
-                    val rawTitle = card.selectFirst("p.text-xs, .card-overlay p, p.font-medium")?.text()
-                        ?: card.attr("title")
-                    val badge = card.selectFirst("span.badge, p.text-muted, div.text-xs, .card-overlay span")?.text()?.trim()
-                    val relation = badge?.takeIf { it.isNotBlank() && !rawTitle.equals(it, ignoreCase = true) }
-                        ?: detectRelationFromTitle(rawTitle)
-
-                    val coverUrl = card.selectFirst("img")?.absUrl("src")
-                    val cover = coverUrl?.toProxiedImageHolder()
-                    list.add(
-                        Album(
-                            id = href,
-                            title = rawTitle,
-                            subtitle = relation,
-                            type = Album.Type.Show,
-                            cover = cover,
-                        )
-                    )
-                }
-            }
-        }
-        return list.distinctBy { it.id }
-    }
-
-    private fun String?.toWsrvUrl(): String? {
-        if (this.isNullOrBlank()) return null
-        if (this.startsWith("https://wsrv.nl/?url=") || this.startsWith("http://wsrv.nl/?url=")) return this
-        val fullUrl = if (this.startsWith("//")) "https:$this"
-        else if (this.startsWith("/")) "$baseUrl$this"
-        else this
-        return "https://wsrv.nl/?url=$fullUrl"
-    }
-
-    private fun String?.toProxiedImageHolder(): ImageHolder? {
-        return this.toWsrvUrl()?.toImageHolder()
-    }
-
-    private fun detectRelationFromTitle(title: String): String {
-        return when {
-            Regex("""(?i)\b(?:Season\s*1|1st\s*Season)\b""").containsMatchIn(title) -> "Season 1"
-            Regex("""(?i)\b(?:Season\s*2|2nd\s*Season)\b""").containsMatchIn(title) -> "Season 2"
-            Regex("""(?i)\b(?:Season\s*3|3rd\s*Season)\b""").containsMatchIn(title) -> "Season 3"
-            Regex("""(?i)\b(?:Season\s*4|4th\s*Season)\b""").containsMatchIn(title) -> "Season 4"
-            Regex("""(?i)\b(?:Season\s*5|5th\s*Season)\b""").containsMatchIn(title) -> "Season 5"
-            Regex("""(?i)\b(?:Season\s*6|6th\s*Season)\b""").containsMatchIn(title) -> "Season 6"
-            Regex("""(?i)\b(?:Final\s*Season|Part\s*2|Part\s*3|Cour\s*2)\b""").containsMatchIn(title) -> {
-                Regex("""(?i)\b(Final\s*Season|Part\s*\d+|Cour\s*\d+)\b""").find(title)?.value?.trim() ?: "Sequel"
-            }
-            Regex("""(?i)\b(?:Movie|The\s*Movie|Film)\b""").containsMatchIn(title) -> "Movie"
-            Regex("""(?i)\b(?:OVA|OAD|Special|Side\s*Story)\b""").containsMatchIn(title) -> "OVA / Special"
-            Regex("""(?i)\b(?:Prequel|Prolog)\b""").containsMatchIn(title) -> "Prequel"
-            Regex("""(?i)\b(?:Sequel)\b""").containsMatchIn(title) -> "Sequel"
-            Regex("""(?i)\b(?:Spin-off|Spinoff)\b""").containsMatchIn(title) -> "Spin-off"
-            else -> "Related"
-        }
+        val variants = HlsUtils.parseMasterPlaylist(masterUrl, content)
+        val maxQuality = variants.maxOfOrNull { it.quality } ?: 1080
+        return listOf(source(masterUrl, maxQuality, "Auto")) +
+            variants.map { source(it.url, it.quality, it.resolutionLabel) }
     }
 
     private fun sortSources(sources: List<Streamable.Source>): List<Streamable.Source> {
-        val qualityPref = setting?.getString(PREF_QUALITY_KEY) ?: PREF_QUALITY_DEFAULT
-        val langPref = setting?.getString(PREF_LANG_KEY) ?: PREF_LANG_DEFAULT
-
-        val primaryLang = if (langPref == "eng") "English" else "Japanese"
-        val secondaryLang = if (langPref == "eng") "Japanese" else "English"
-
-        val qualityOrder = mutableListOf<String>()
-        qualityOrder.add(qualityPref)
-        if ("1080p" != qualityPref) qualityOrder.add("1080p")
-        if ("720p" != qualityPref) qualityOrder.add("720p")
-        if ("360p" != qualityPref) qualityOrder.add("360p")
-        if ("Auto" != qualityPref) qualityOrder.add("Auto")
-
-        val langOrder = mutableListOf(primaryLang, secondaryLang)
-
-        val idealOrder = langOrder.flatMap { lang ->
-            qualityOrder.map { res -> "$lang - $res" }
-        }
-
-        return sources.sortedBy { src ->
-            val title = src.title ?: ""
-            val idx = idealOrder.indexOfFirst { title.startsWith(it, ignoreCase = true) }
-            if (idx != -1) idx else Int.MAX_VALUE
-        }
+        val pref = setting?.getString(PREF_QUALITY_KEY) ?: PREF_QUALITY_DEFAULT
+        return sources.sortedWith(
+            compareByDescending<Streamable.Source> { it.title == pref }
+                .thenByDescending { it.quality },
+        )
     }
 
-    private suspend fun httpGet(url: String, isApi: Boolean = false): String = withContext(Dispatchers.IO) {
-        val acceptHeader = if (isApi) {
-            "application/json, text/plain, */*"
-        } else {
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    private suspend fun getHome(): HomeDto =
+        homeCache.get("home") ?: json.decodeFromString<HomeDto>(httpGet("$baseUrl/api/home"))
+            .also { homeCache.put("home", it) }
+
+    private suspend fun sectionAlbums(name: String): List<Album> {
+        val posts = getHome().sections.firstOrNull { it.name == name }?.posts.orEmpty()
+        return posts.toAlbums()
+    }
+
+    private fun postsPaged(urlForPage: (Int) -> String): PagedData.Continuous<Shelf> =
+        PagedData.Continuous { continuation ->
+            val page = continuation?.toIntOrNull() ?: 1
+            val (albums, hasNext) = loadPostsPage(urlForPage(page))
+            Page(albums.map { it.toShelf() }, if (hasNext) (page + 1).toString() else null)
         }
 
-        val request = Request.Builder()
-            .url(url)
+    private suspend fun loadPostsPage(url: String): Pair<List<Album>, Boolean> {
+        val posts = json.decodeFromString<PostListDto>(httpGet(url)).posts
+        return Pair(posts.toAlbums(), posts.size >= PAGE_SIZE)
+    }
+
+    // List endpoints only return ids, so titles/posters come from each post
+    private suspend fun List<PostItemDto>.toAlbums(): List<Album> = coroutineScope {
+        map { item ->
+            async(Dispatchers.IO) {
+                fetchPermits.withPermit {
+                    runCatching { fetchPost(item.id).toAlbum() }.getOrNull()
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    private suspend fun fetchPost(id: Long): PostDto =
+        postCache.get(id) ?: json.decodeFromString<PostDto>(httpGet("$baseUrl/api/post?id=$id"))
+            .also { postCache.put(id, it) }
+
+    private fun PostDto.toAlbum(): Album = Album(
+        id = id.toString(),
+        title = title,
+        type = Album.Type.Show,
+        cover = poster?.takeIf { it.isNotBlank() }?.toImageHolder(),
+        description = buildDescription(),
+    )
+
+    // Old saved entries use "/anime/<slug>-<id>" where post id = id + 1e9
+    private fun String.toPostId(): Long {
+        val id = POST_ID_REGEX.find(trimEnd('/'))?.value?.toLongOrNull()
+            ?: throw IllegalArgumentException("Invalid AniDB id: $this")
+        return if (id < POST_ID_OFFSET) id + POST_ID_OFFSET else id
+    }
+
+    private val playHeaders = mapOf(
+        "Referer" to "https://play.app/",
+        "X-Requested-With" to "PLAY",
+    )
+
+    private suspend fun httpGet(
+        url: String,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): String = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
-            .header("Referer", "$baseUrl/")
-            .header("Accept", acceptHeader)
-            .header("Accept-Language", "en-US,en;q=0.5")
+            .header("Accept", "application/json, text/plain, */*")
+            .apply { extraHeaders.forEach { (k, v) -> header(k, v) } }
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("HTTP error ${response.code} for URL: $url")
-            }
-            response.body?.string() ?: ""
-        }
-    }
-
-    private fun String.toEchoDate(): Date? {
-        return try {
-            val parts = this.split("-").mapNotNull { it.toIntOrNull() }
-            if (parts.isEmpty()) null
-            else Date(parts[0], parts.getOrNull(1), parts.getOrNull(2))
-        } catch (e: Exception) {
-            null
+            if (!response.isSuccessful) throw Exception("HTTP error ${response.code} for URL: $url")
+            response.body?.string().orEmpty()
         }
     }
 
     companion object {
-        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+
+        private const val PLAY_URL = "https://play.anidb.app"
+        private const val LEGACY_HOST = "anidb.app"
+        private const val LATEST_TAB = "__latest"
+        private const val POST_ID_OFFSET = 1_000_000_000L
+        private const val PAGE_SIZE = 30
+        private val POST_ID_REGEX = Regex("""\d+$""")
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
-        private const val PREF_QUALITY_TITLE = "Preferred Quality"
         private const val PREF_QUALITY_DEFAULT = "1080p"
 
         private const val PREF_LANG_KEY = "preferred_lang"
-        private const val PREF_LANG_TITLE = "Preferred Language"
         private const val PREF_LANG_DEFAULT = "jpn"
 
         private const val PREF_FILLER_TAG_KEY = "append_filler_tag"
-        private const val PREF_FILLER_TAG_TITLE = "Filler Detection"
-        private const val PREF_FILLER_TAG_DEFAULT = true
-
         private const val PREF_FILLER_HIDE_KEY = "hide_filler"
-        private const val PREF_FILLER_HIDE_TITLE = "Hide Filler Episodes"
-        private const val PREF_FILLER_HIDE_DEFAULT = false
 
-        private const val PREF_AUTOSKIP_KEY = "auto_skip_op_ed"
-        private const val PREF_AUTOSKIP_TITLE = "Auto-Skip OP/ED"
-        private const val PREF_AUTOSKIP_DEFAULT = false
-
-        private val ANIME_ID_REGEX = Regex("-(\\d+)$")
-        private val M3U8_REGEX = Regex("""(?:file|source|src)\s*:\s*['"](https?://[^'"]+?\.m3u8[^'"]*)['"]""", RegexOption.IGNORE_CASE)
-        private val DIRECT_M3U8_REGEX = Regex("""(https?://[^\s'"]+?\.m3u8[^\s'"]*)""", RegexOption.IGNORE_CASE)
+        private val LANGUAGES = linkedMapOf(
+            "jpn" to "Japanese",
+            "eng" to "English",
+            "chi" to "Chinese",
+            "kor" to "Korean",
+        )
     }
 }
